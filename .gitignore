@@ -1,0 +1,17 @@
+# dependencies
+node_modules/
+
+# generated at runtime by perch_pull / perch_fetch_generator
+.perch-mirror/
+
+# screenshots written by perch_shot
+perch_shot.png
+*.shot.png
+
+# local test output
+test/out/
+
+# os / editor noise
+.DS_Store
+Thumbs.db
+*.log
