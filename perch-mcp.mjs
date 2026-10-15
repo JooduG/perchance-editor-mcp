@@ -354,7 +354,7 @@ const TOOLS = [
   },
   {
     name: "perch_upload_src",
-    description: "Upload a file into the generator's src/ via the editor's file panel (DataTransfer injection — no OS dialog needed). The file lands in the editor src store ('saved'); the public srcManifest follows the generator-data snapshot.",
+    description: "Upload a file into the generator's src/ via the editor's file panel (DataTransfer injection — no OS dialog needed). The file lands in the editor src store ('saved'); it goes public when the generator's owner saves.",
     inputSchema: {
       type: "object",
       properties: {

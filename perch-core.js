@@ -914,7 +914,7 @@ class PerchSession {
     return {
       ok: saved, file: name, saved, ms: Date.now() - t0,
       hint: saved
-        ? 'saved to the editor src store; the public srcManifest follows the generator-data snapshot (owner save publishes immediately)'
+        ? 'saved to the editor src store; visitors see it once the generator owner saves'
         : 'file was injected but the panel never reported "saved" — check perch_errors and retry',
     };
   }

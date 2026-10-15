@@ -82,13 +82,11 @@ mcp_servers:
     connect_timeout: 120
 ```
 
-Then `/reload-mcp` in a live session, or start a new one. Hermes discovers the
-tools as `mcp_perch_<name>`.
+Then restart the client after registering.
 
-> **Windows:** any MCP server whose command is a bare `npx`/`uvx`/`.cmd` shim
-> fails with "server refused the connection", because Hermes spawns MCP commands
-> directly with no shell. Always use `command: node` with an absolute `.mjs`
-> path — which is what this project does.
+> **Windows:** prefer `command: node` with an absolute `.mjs` path. Bare
+> `npx`/`uvx`/`.cmd` shims fail to launch in clients that spawn MCP commands
+> without a shell — this project's `node` entry avoids that.
 
 ### Claude Desktop / any MCP client
 
@@ -103,16 +101,11 @@ tools as `mcp_perch_<name>`.
 }
 ```
 
-### Config knobs
-
-| Key | Meaning |
-|---|---|
-| `timeout` | Per-call ceiling. **Keep ≥180s** — a full Cloudflare ladder can outlast 180s. |
-| `connect_timeout` | Server startup budget. 120s is safe. |
-
-There are **no environment variables and no config files**. Generator name and
-collab key are per-call arguments, so one server instance serves any number of
-generators.
+The server itself has **no environment variables and no config files**.
+Generator name and collab key are per-call arguments, so one server instance
+serves any number of generators. If your client supports per-call timeouts,
+give this server a generous one — a full Cloudflare ladder can outlast short
+ceilings.
 
 ---
 
@@ -364,25 +357,16 @@ document. The resolver now reads the id via `getAttribute('id')`, then falls
 back to a perchance-subdomain URL regex, then to any live non-blank child frame.
 If you hit the symptom again, the fallback chain is the place to look.
 
-### 5. Collab saves: what "deployed" means
+### 5. Collab edits are not public until the owner saves
 
-Measured behaviour in a collab edit room (`#edit:collab=KEY`, no login):
-
-- Code edits (`model`/`output`) sync live and reach the **deployed generator
-  automatically** — no save click exists or is needed. Propagation to the
-  public API is not instant: the first batch after this tool's writes showed up
-  in `perch_pull` within minutes, a later small edit stayed unpublished for
-  15+ minutes while a session held the room open, then published after the
-  session closed. Treat "deployed" as *eventually consistent*.
-- `perch_status.saveState` reflects the editor's own save indicator; the
-  preview iframe renders the **saved** generator, so a UI check only means
-  something after a refresh on a fully synced doc.
-- The **owner** publishing from a logged-in editor is the immediate path: an
-  owner save persists everything at once.
-- `src/` uploads (see `perch_upload_src`) land in the editor's src store
-  ("✅ saved" in the file panel) but the **public `srcManifest` follows the
-  same delayed generator-data snapshot** — verify with `perch_list_src` /
-  `perch_pull` (`srcManifestKeys`), not the panel.
+In a collab edit room (`#edit:collab=KEY`, no login), edits sync live to the
+room — every connected editor sees them, and so does the owner's editor view —
+but the **public generator that visitors see only updates when the owner
+saves**. Until then, `perch_pull` / `perch_list_src` keep returning the last
+saved state, and the preview iframe renders that saved generator too. An owner
+save publishes everything at once: `model`, `output`, and the `src/` manifest.
+So after editing with a collab key, report the changes as "live in the room,
+pending the owner's save" rather than "deployed".
 
 ### 6. Two different file inputs in the editor panel
 
@@ -407,12 +391,7 @@ It carries its own generator editor, so `document.querySelectorAll('button')
 Pass `clear: true` to `perch_errors` / `perch_console` after fixing something,
 or the tail will be dominated by stale app noise.
 
-### 9. MCP tool lists are cached at session start
-
-After editing `perch-mcp.mjs` to add a tool, the host keeps calling the old
-server until you `/reload-mcp` (Hermes) or restart the client.
-
-### 10. `frame.evaluate` callbacks are serialized
+### 9. `frame.evaluate` callbacks are serialized
 
 The callback passed to `frame.evaluate(fn, arg)` runs **in the browser** — only
 `arg` is in scope. Closing over an outer JS variable throws
@@ -456,7 +435,7 @@ Three touch points, all in plain sight:
    name to a `PerchSession` method.
 3. **`perch-core.js`** — implement the method on `PerchSession`.
 
-Then `/reload-mcp` (or restart the client) and run `npm run test:mcp`.
+Then restart the MCP client (so it re-lists the tools) and run `npm run test:mcp`.
 
 A new tool needs no new plumbing: `perch-mcp.mjs` already wraps every result in
 JSON, adds `ms`, and converts a thrown error into `{ok: false, error}`.
