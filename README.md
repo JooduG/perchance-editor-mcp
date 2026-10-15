@@ -9,7 +9,7 @@ Two distinct code paths, deliberately:
 | Path | Tools | Cost | Cloudflare |
 |---|---|---|---|
 | **Browser-free** | `perch_pull`, `perch_fetch_generator`, `perch_src`, `perch_list_src` | ~1s | none — uses `curl` |
-| **Live editor** | `perch_start` + the other 20 | ~3.7s start, then 3–20ms/call | mitigated, see [Cloudflare](#cloudflare) |
+| **Live editor** | `perch_start` + the other 22 | ~3.7s start, then 3–20ms/call | mitigated, see [Cloudflare](#cloudflare) |
 
 Reads should almost always use the browser-free path. The browser exists for
 edits, `eval`, and UI testing.
@@ -41,7 +41,8 @@ Requires **Node 18+** and **`curl` on `PATH`** (used for the browser-free path �
 on Windows 10+ `curl.exe` ships with the OS).
 
 ```bash
-cd perch-mcp
+git clone https://github.com/Nightomaru/perchance-editor-mcp.git
+cd perchance-editor-mcp
 npm install
 npx playwright install chromium      # downloads the browser binary
 ```
@@ -51,6 +52,8 @@ npx playwright install chromium      # downloads the browser binary
 against Cloudflare). If `patchright` fails to install, everything else still
 works — it is an optional dependency and `perch-core.js` degrades to plain
 `playwright`.
+
+Updating to a newer release: `git pull && npm install`.
 
 ### Verify the install
 
@@ -77,7 +80,7 @@ mcp_servers:
   perch:
     command: node
     args:
-      - /absolute/path/to/perch-mcp/perch-mcp.mjs
+      - /absolute/path/to/perchance-editor-mcp/perch-mcp.mjs
     timeout: 180
     connect_timeout: 120
 ```
@@ -95,7 +98,7 @@ Then restart the client after registering.
   "mcpServers": {
     "perch": {
       "command": "node",
-      "args": ["/absolute/path/to/perch-mcp/perch-mcp.mjs"]
+      "args": ["/absolute/path/to/perchance-editor-mcp/perch-mcp.mjs"]
     }
   }
 }
@@ -495,7 +498,7 @@ Output lands in `test/out/` and is gitignored.
 ## Files
 
 ```
-perch-mcp/
+perchance-editor-mcp/
 ├── perch-mcp.mjs        MCP server: tool schemas + DISPATCH map + stdio transport
 ├── perch-core.js        PerchSession: browser control, CF ladder, API pulls, all 27 impls
 ├── package.json         deps: @modelcontextprotocol/sdk, playwright (patchright optional)
