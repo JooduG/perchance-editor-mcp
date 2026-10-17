@@ -46,10 +46,14 @@ npx playwright install chromium      # downloads the browser binary
 ```
 
 `npm install` pulls `@modelcontextprotocol/sdk` and `playwright`, and
-*optionally* `patchright` (a stealth Chromium build used only as a fallback
-against Cloudflare). If `patchright` fails to install, everything else still
-works — it is an optional dependency and `perch-core.js` degrades to plain
-`playwright`.
+*optionally* `patchright` (an undetected playwright fork used only as a
+fallback engine against Cloudflare). If `patchright` fails to install,
+everything else still works — it is an optional dependency and the session
+degrades to plain `playwright` (reported as `effectiveEngine` by
+`perch_start`/`perch_status`, never silently). With patchright installed you
+can additionally run `npx patchright install chrome` so the patchright engine
+can use the real Chrome channel (it falls back to the bundled chromium build
+when Chrome is absent).
 
 Updating to a newer release: `git pull && npm install`.
 

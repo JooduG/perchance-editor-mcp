@@ -15,7 +15,8 @@
 //                        the live preview with usable CSS selectors.
 //   * perch_wait       — wait for a selector/text to appear or vanish.
 //   * perch_errors     — syntax errors + buffered console/runtime errors.
-//   * start.engine     — 'chromium' | 'patchright' (stealth build).
+//   * start.engine     — 'chromium' | 'patchright' (undetected playwright
+//     fork, used as the Cloudflare fallback engine).
 //   * preview-frame resolution that makes eval/click/type/shot all work.
 //   * CF auto-escalation ladder inside perch_start.
 
@@ -47,7 +48,7 @@ const TOOLS = [
         name: { type: "string", description: "Generator name, e.g. 'minimal'" },
         collabKey: { type: "string", description: "Collab key from the editor URL hash (#edit:collab=KEY)" },
         headed: { type: "boolean", description: "Show a visible browser window. Default false" },
-        engine: { type: "string", enum: ["chromium", "patchright"], description: "Browser engine. 'patchright' = stealth build, better vs Cloudflare. Default chromium" },
+        engine: { type: "string", enum: ["chromium", "patchright"], description: "Browser engine. 'patchright' = undetected playwright fork, used as the Cloudflare fallback. Default chromium" },
         width: { type: "integer", description: "Viewport width. Default 1500" },
         height: { type: "integer", description: "Viewport height. Default 950" },
         force: { type: "boolean", description: "Reload even if already on this generator" },

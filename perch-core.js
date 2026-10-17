@@ -17,7 +17,13 @@
 //   * Diagnostics: console + pageerror buffers captured from every frame.
 //   * UI testing by text: `snapshot()` lists interactive elements in the live
 //     preview so an agent can drive the UI without screenshots.
-//   * engine option: 'chromium' (playwright) | 'patchright' (stealth build).
+//   * engine option: 'chromium' (playwright) | 'patchright' (stealth driver).
+//     patchright runs with ITS OWN recommended config (no custom UA, no JS
+//     fingerprint injection, no extra flags) and needs two adaptations:
+//     - every evaluate that must see page-set globals passes
+//       isolatedContext:false (patchright defaults to an isolated world);
+//     - console/pageerror events never fire under patchright (Console API is
+//       disabled there), so diagnostics come from an in-page hook instead.
 //
 // NOTE ON eval(): the `evaluate(...)` calls below are a browser JS-expression
 // evaluator — that IS the feature (perch_eval / perch_type drive the live
@@ -26,6 +32,9 @@
 const path = require('path');
 const fs = require('fs');
 
+// UA for the browser-free curl path only. The live browser path derives its
+// UA from the actual binary version (see _launch) so the UA string can never
+// contradict the client-hints headers the browser itself sends.
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
 const IDLE_MS = 20 * 60 * 1000;
@@ -55,17 +64,96 @@ const STEALTH_INIT = () => {
   } catch (e) {}
 };
 
+// patchright evaluates in an ISOLATED world by default (that is how it avoids
+// Runtime.enable), where page-set globals are invisible. Its extended
+// signature takes isolatedContext as the 4th parameter; plain playwright has
+// exactly (fn, arg) and rejects extra args, so the call shape depends on the
+// loaded driver (EVAL_EXTENDED, set by loadChromium). Use evalMain for EVERY
+// evaluate that touches page globals or must behave like page-side JS.
+function evalMain(target, fn, arg) {
+  return EVAL_EXTENDED
+    ? target.evaluate(fn, arg, undefined, false)
+    : target.evaluate(fn, arg);
+}
+
+// Default UA template per host OS (no fingerprint injection — this only
+// exists to strip the "Headless" marker in headless mode, keeping the REAL
+// browser version so UA and client hints always agree).
+function platformUaPrefix() {
+  switch (process.platform) {
+    case 'darwin': return 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko)';
+    case 'linux': return 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko)';
+    default: return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)';
+  }
+}
+
+// In-page diagnostics hook, installed via addInitScript (main world) ONLY
+// under patchright, where the driver-level Console API is disabled and
+// page.on('console')/page.on('pageerror') never fire. Buffers console output
+// and uncaught errors per frame; the Node side drains the buffers on a timer
+// (see _drainPageDiag). Must stay self-contained and never throw.
+const DIAG_HOOK = () => {
+  try {
+    if (window.__perchDiagInstalled) return;
+    Object.defineProperty(window, '__perchDiagInstalled', { value: true });
+    const buf = [];
+    const MAX = 250;
+    const push = (type, text) => {
+      try {
+        buf.push({ type, text: String(text).slice(0, 500) });
+        if (buf.length > MAX) buf.splice(0, buf.length - MAX);
+      } catch (e) {}
+    };
+    const fmt = (args) => {
+      try {
+        return Array.prototype.map.call(args, a => {
+          if (a instanceof Error) return (a.stack || a.message || String(a));
+          if (typeof a === 'object' && a !== null) { try { return JSON.stringify(a); } catch (e) { return String(a); } }
+          return String(a);
+        }).join(' ');
+      } catch (e) { return ''; }
+    };
+    ['log', 'info', 'warn', 'error'].forEach(level => {
+      const orig = console[level] ? console[level].bind(console) : null;
+      console[level] = function () {
+        try { push(level === 'warn' ? 'warning' : level, fmt(arguments)); } catch (e) {}
+        if (orig) orig.apply(null, arguments);
+      };
+    });
+    window.addEventListener('error', e => { push('pageerror', (e && e.message) || String(e)); });
+    window.addEventListener('unhandledrejection', e => {
+      const r = e && e.reason;
+      push('unhandledrejection', (r && (r.stack || r.message)) ? String(r.stack || r.message) : String(r));
+    });
+    window.__perchDiagDrain = () => { try { return buf.splice(0, buf.length); } catch (e) { return []; } };
+  } catch (e) {}
+};
+
 const _engineCache = {};
+// Whether the ACTIVE driver understands patchright's extended evaluate
+// signature (4th param isolatedContext). Plain playwright's evaluate accepts
+// exactly (fn, arg) and hard-rejects extra args, so every evaluate must go
+// through evalMain, which picks the right call shape. Set by loadChromium on
+// every launch — the active driver is always the one the page was created
+// with (single PerchSession per server process, launched before any eval).
+let EVAL_EXTENDED = false;
 function loadChromium(engine) {
   const key = engine === 'patchright' ? 'patchright' : 'playwright';
-  if (_engineCache[key]) return _engineCache[key];
-  let mod;
+  if (_engineCache[key]) { EVAL_EXTENDED = _engineCache[key].extended; return _engineCache[key]; }
+  let mod, fallback = false;
   if (key === 'patchright') {
-    try { mod = require('patchright'); } catch { mod = require('playwright'); }
+    try { mod = require('patchright'); } catch { mod = require('playwright'); fallback = true; }
   } else {
     mod = require('playwright');
   }
-  _engineCache[key] = mod.chromium;
+  if (fallback) {
+    // Loud, not silent: a missing optional dependency must never leave the
+    // session reporting an engine it is not actually running.
+    try { console.error('perch-mcp: patchright is not installed — running plain playwright for engine "patchright".'); } catch (e) {}
+  }
+  const extended = key === 'patchright' && !fallback;
+  EVAL_EXTENDED = extended;
+  _engineCache[key] = { chromium: mod.chromium, fallback, extended };
   return _engineCache[key];
 }
 
@@ -80,7 +168,7 @@ function buildEditorUrl(name, collabKey) {
 // interstitial's structural signals instead.
 async function isCfBlocked(page) {
   try {
-    return await page.evaluate(() => {
+    return await evalMain(page, () => {
       const t = (document.body && document.body.innerText || '').toLowerCase();
       const title = (document.title || '').toLowerCase();
       const hasTurnstile = document.querySelector(
@@ -105,9 +193,12 @@ class PerchSession {
     this.collabKey = null;
     this.headed = null;      // true = visible window
     this.engine = 'chromium';
+    this.effectiveEngine = null; // what is actually running (channel / fallback)
+    this._usingPatchright = false;
     this.ready = false;
     this.last = Date.now();
     this._idle = null;
+    this._diagDrain = null;
     this.diag = { console: [], errors: [], droppedConsole: 0, droppedErrors: 0 };
   }
 
@@ -124,12 +215,14 @@ class PerchSession {
   }
 
   // ---------------- diagnostics (console + runtime errors) ----------------
+  _pushDiag(arr, droppedKey, entry, cap = 300) {
+    arr.push(entry);
+    if (arr.length > cap) { arr.shift(); this.diag[droppedKey]++; }
+  }
+
   _attachDiagnostics(page) {
     this.diag = { console: [], errors: [], droppedConsole: 0, droppedErrors: 0 };
-    const push = (arr, droppedKey, entry, cap = 300) => {
-      arr.push(entry);
-      if (arr.length > cap) { arr.shift(); this.diag[droppedKey]++; }
-    };
+    const push = (arr, droppedKey, entry, cap = 300) => this._pushDiag(arr, droppedKey, entry, cap);
     try {
       page.on('console', (msg) => {
         const type = msg.type();
@@ -148,11 +241,47 @@ class PerchSession {
         push(this.diag.console, 'droppedConsole', `[net-fail] ${url.slice(0, 120)} — ${f ? f.errorText : 'unknown'}`);
       });
     } catch (e) {}
+    // Under patchright the two listeners above never fire (Console API is
+    // disabled driver-side) — the in-page hook + timer below is the source.
+    this._startDiagDrain();
+  }
+
+  _startDiagDrain() {
+    this._stopDiagDrain();
+    if (this.engine !== 'patchright' || !EVAL_EXTENDED) return;
+    this._diagDrain = setInterval(() => { this._drainPageDiag().catch(() => {}); }, 700);
+    this._diagDrain.unref();
+  }
+
+  _stopDiagDrain() {
+    if (this._diagDrain) { clearInterval(this._diagDrain); this._diagDrain = null; }
+  }
+
+  // Pull buffered console/pageerror entries out of every frame's in-page hook
+  // buffer (patchright only; the hook is not installed on other engines).
+  async _drainPageDiag() {
+    if (!EVAL_EXTENDED || !this.page) return;
+    for (const f of this.page.frames()) {
+      let entries = null;
+      try {
+        entries = await f.evaluate(() => (window.__perchDiagDrain ? window.__perchDiagDrain() : []), undefined, undefined, false);
+      } catch { continue; }
+      if (!entries || !entries.length) continue;
+      for (const en of entries) {
+        if (!en || !en.type) continue;
+        if (en.type === 'pageerror' || en.type === 'unhandledrejection') {
+          this._pushDiag(this.diag.errors, 'droppedErrors', `[${en.type}] ${en.text}`);
+        } else {
+          this._pushDiag(this.diag.console, 'droppedConsole', `[${en.type}] ${en.text}`);
+        }
+      }
+    }
   }
 
   async errors({ clear = false } = {}) {
+    await this._drainPageDiag().catch(() => {});
     const syntax = this.page
-      ? await this.page.evaluate(() => {
+      ? await evalMain(this.page, () => {
           try { return window.getEditorSyntaxErrors ? window.getEditorSyntaxErrors() : null; } catch (e) { return 'err:' + e.message; }
         }).catch(() => null)
       : null;
@@ -175,7 +304,7 @@ class PerchSession {
       this._touch();
       let s = null;
       try {
-        s = await this.page.evaluate(() => ({
+        s = await evalMain(this.page, () => ({
           synced: !!(window.yjsProvider && window.yjsProvider.synced),
           save: window.perchanceSaveState || null,
         }));
@@ -224,16 +353,59 @@ class PerchSession {
   }
 
   async _newContext(width, height) {
-    const ctx = await this.browser.newContext({
-      userAgent: UA, viewport: { width, height }, locale: LOCALE, timezoneId: TIMEZONE,
-    });
+    const opts = { viewport: { width, height } };
+    if (this._usingPatchright) {
+      // Patchright best practice: no custom UA/headers, no locale/timezone or
+      // JS fingerprint injection — the driver's own patches are the stealth.
+      // ONE exception: in headless the default UA advertises "Headless" —
+      // override it with the real version string of the running binary so UA
+      // and client-hint headers never contradict each other.
+      if (this.browser && this.headed === false) {
+        const real = String(this.browser.version() || '');
+        if (real) opts.userAgent = platformUaPrefix() + ' Chrome/' + real + ' Safari/537.36';
+      }
+      const ctx = await this.browser.newContext(opts);
+      await ctx.addInitScript(DIAG_HOOK);
+      return ctx;
+    }
+    if (this.browser && this.headed === false) {
+      // Headless default UA contains the "Headless" marker; replace it with
+      // the real binary version (the old hardcoded version drifted from the
+      // actual browser and contradicted the client-hint headers).
+      const real = String(this.browser.version() || '');
+      if (real) opts.userAgent = platformUaPrefix() + ' Chrome/' + real + ' Safari/537.36';
+      else opts.userAgent = UA;
+    }
+    opts.locale = LOCALE;
+    opts.timezoneId = TIMEZONE;
+    const ctx = await this.browser.newContext(opts);
     await ctx.addInitScript(STEALTH_INIT);
     return ctx;
   }
 
   async _launch(headed, width, height) {
-    const chromium = loadChromium(this.engine);
-    const browser = await chromium.launch({ headless: !headed, args: STEALTH_ARGS });
+    const loaded = loadChromium(this.engine);
+    const chromium = loaded.chromium;
+    const usePatchright = this.engine === 'patchright' && !loaded.fallback;
+    this._usingPatchright = usePatchright;
+    let browser;
+    if (loaded.fallback) {
+      this.effectiveEngine = 'playwright (patchright module unavailable)';
+      browser = await chromium.launch({ headless: !headed, args: STEALTH_ARGS });
+    } else if (usePatchright) {
+      // Prefer the real Chrome channel when present (patchright README best
+      // practice); fall back to the bundled chromium build otherwise.
+      this.effectiveEngine = 'patchright';
+      try {
+        browser = await chromium.launch({ headless: !headed, channel: 'chrome' });
+        this.effectiveEngine = 'patchright + chrome channel';
+      } catch (e) {
+        browser = await chromium.launch({ headless: !headed });
+      }
+    } else {
+      this.effectiveEngine = 'playwright';
+      browser = await chromium.launch({ headless: !headed, args: STEALTH_ARGS });
+    }
     this.browser = browser;
     this.ctx = await this._newContext(width, height);
     this._ensureIdle();
@@ -342,6 +514,7 @@ class PerchSession {
       this.ready = false;
       return {
         ok: false, generator: name, collabKey, url, headed: this.headed, engine: this.engine,
+        effectiveEngine: this.effectiveEngine || this.engine,
         ms: Date.now() - t0, cfBlocked: true, attempts: r.attempts,
         error: 'Cloudflare challenge not cleared after ' + r.attempts.length + ' attempt(s).',
         hint: 'CF flagging is intermittent — retry, or use engine:"patchright", or headed:true.',
@@ -351,6 +524,7 @@ class PerchSession {
     this.ready = !!(st.hasOutputView && st.hasModelView && !st.cfBlocked);
     return {
       ok: true, generator: name, collabKey, url, headed: this.headed, engine: this.engine,
+      effectiveEngine: this.effectiveEngine || this.engine,
       docsReady: st.hasOutputView, recoveryStep: r.step, attempts: r.attempts, ms: Date.now() - t0,
       ...(this.ready ? {} : { warning: 'Editor docs not fully ready — try perch_start again.' }),
     };
@@ -360,7 +534,7 @@ class PerchSession {
     if (!this.page) return { ok: true, running: false, engine: this.engine, hint: 'call perch_start first' };
     this._touch();
     const cfNow = await isCfBlocked(this.page);
-    const pageState = await this.page.evaluate(() => {
+    const pageState = await evalMain(this.page, () => {
       let syntaxErrors = null;
       try { syntaxErrors = window.getEditorSyntaxErrors ? window.getEditorSyntaxErrors() : null; } catch (e) {}
       return {
@@ -377,6 +551,7 @@ class PerchSession {
     const result = {
       ok: true, running: true, generator: this.generator, collabKey: this.collabKey,
       headed: this.headed, engine: this.engine,
+      effectiveEngine: this.effectiveEngine || this.engine,
       consoleBuffered: this.diag.console.length, errorsBuffered: this.diag.errors.length,
       ...pageState,
     };
@@ -441,7 +616,7 @@ class PerchSession {
   async read({ pane = 'output', offset = 1, limit = 2000 } = {}) {
     if (!this.page) throw new Error('call perch_start first');
     this._touch();
-    return await this.page.evaluate(({ pane, offset, limit }) => {
+    return await evalMain(this.page, ({ pane, offset, limit }) => {
       const v = pane === 'model' ? window.modelTextEditor : window.outputTemplateEditor;
       if (!v) return { ok: false, error: 'editor view not ready' };
       const all = v.state.doc.toString().split('\n');
@@ -453,7 +628,7 @@ class PerchSession {
   async grep({ pattern, pane = null, contextLines = 0, limit = 200 } = {}) {
     if (!this.page) throw new Error('call perch_start first');
     this._touch();
-    return await this.page.evaluate(({ pattern, pane, contextLines, limit }) => {
+    return await evalMain(this.page, ({ pattern, pane, contextLines, limit }) => {
       let re;
       try { re = new RegExp(pattern, 'gi'); } catch (e) { return { ok: false, error: 'bad regex: ' + e.message }; }
       const readOne = p => {
@@ -484,7 +659,7 @@ class PerchSession {
   async edit({ pane = 'output', oldString, newString, replaceAll = false, settle = true, nth = null } = {}) {
     if (!this.page) throw new Error('call perch_start first');
     this._touch();
-    const res = await this.page.evaluate(({ pane, oldString, newString, replaceAll, nth }) => {
+    const res = await evalMain(this.page, ({ pane, oldString, newString, replaceAll, nth }) => {
       const v = pane === 'model' ? window.modelTextEditor : window.outputTemplateEditor;
       if (!v) return { ok: false, error: 'view not ready' };
       if (v.state.doc.length === 0)
@@ -515,7 +690,7 @@ class PerchSession {
   async write({ pane = 'output', content, settle = true } = {}) {
     if (!this.page) throw new Error('call perch_start first');
     this._touch();
-    const res = await this.page.evaluate(({ pane, content }) => {
+    const res = await evalMain(this.page, ({ pane, content }) => {
       const v = pane === 'model' ? window.modelTextEditor : window.outputTemplateEditor;
       if (!v) return { ok: false, error: 'view not ready' };
       v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: content }, userEvent: 'input' });
@@ -538,7 +713,7 @@ class PerchSession {
   async outline({ pane = 'output', limit = 400 } = {}) {
     if (!this.page) throw new Error('call perch_start first');
     this._touch();
-    return await this.page.evaluate(({ pane, limit }) => {
+    return await evalMain(this.page, ({ pane, limit }) => {
       const v = pane === 'model' ? window.modelTextEditor : window.outputTemplateEditor;
       if (!v) return { ok: false, error: 'editor view not ready' };
       const re = /^\s*(?:export\s+)?(async\s+function|function|class|const|let|var)\s+([A-Za-z_$][\w$]*)/;
@@ -556,7 +731,7 @@ class PerchSession {
     if (!this.page) throw new Error('call perch_start first');
     this._touch();
     const dest = toPane || fromPane;
-    const fromDoc = await this.page.evaluate(p => {
+    const fromDoc = await evalMain(this.page, p => {
       const v = p === 'model' ? window.modelTextEditor : window.outputTemplateEditor;
       return v ? v.state.doc.toString() : null;
     }, fromPane);
@@ -566,7 +741,7 @@ class PerchSession {
     if (!startLine || startLine < 1 || end > fromLines.length)
       return { ok: false, error: 'line range out of bounds', totalLines: fromLines.length };
     const copied = fromLines.slice(startLine - 1, end);
-    const toDoc = await this.page.evaluate(p => {
+    const toDoc = await evalMain(this.page, p => {
       const v = p === 'model' ? window.modelTextEditor : window.outputTemplateEditor;
       return v ? v.state.doc.toString() : null;
     }, dest);
@@ -575,7 +750,7 @@ class PerchSession {
     const after = afterLine == null ? toLines.length : afterLine;
     if (after < 0 || after > toLines.length) return { ok: false, error: 'afterLine out of bounds' };
     const newDoc = toLines.slice(0, after).concat(copied, toLines.slice(after)).join('\n');
-    const res = await this.page.evaluate(({ pane, content }) => {
+    const res = await evalMain(this.page, ({ pane, content }) => {
       const v = pane === 'model' ? window.modelTextEditor : window.outputTemplateEditor;
       if (!v) return { ok: false, error: 'view not ready' };
       v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: content }, userEvent: 'input' });
@@ -591,7 +766,7 @@ class PerchSession {
     this._touch();
     const fr = await this._frame(frame);
     try {
-      const res = await fr.evaluate(js);
+      const res = await evalMain(fr, js);
       return { ok: true, frame, result: res };
     } catch (e) {
       return { ok: false, frame, error: String((e && e.message) || e).slice(0, 300) };
@@ -601,12 +776,13 @@ class PerchSession {
   async refresh() {
     if (!this.page) throw new Error('call perch_start first');
     this._touch();
+    await this._drainPageDiag().catch(() => {});
     const before = this.diag.console.length;
     {
       const fr = await this._frame('preview').catch(() => null);
-      if (fr) await fr.evaluate(() => { window.__perchReloadFlag = true; }).catch(() => {});
+      if (fr) await evalMain(fr, () => { window.__perchReloadFlag = true; }).catch(() => {});
     }
-    await this.page.evaluate(() => {
+    await evalMain(this.page, () => {
       try { if (window.hardReloadOutputIframe) window.hardReloadOutputIframe(); } catch (e) {}
     });
     const t0 = Date.now();
@@ -614,16 +790,17 @@ class PerchSession {
     while (Date.now() - t0 < 25000) {
       const fr = await this._frame('preview').catch(() => null);
       if (fr) {
-        const st = await fr.evaluate(() => ({ flag: !!window.__perchReloadFlag, rs: document.readyState }))
+        const st = await evalMain(fr, () => ({ flag: !!window.__perchReloadFlag, rs: document.readyState }))
           .catch(() => null);
         if (st && !st.flag && st.rs === 'complete') { loaded = true; break; }
       }
       await this.page.waitForTimeout(400);
     }
     await this.page.waitForTimeout(700);
-    const syntaxErrors = await this.page.evaluate(() => {
+    const syntaxErrors = await evalMain(this.page, () => {
       try { return window.getEditorSyntaxErrors ? window.getEditorSyntaxErrors() : null; } catch (e) { return null; }
     }).catch(() => null);
+    await this._drainPageDiag().catch(() => {});
     return {
       ok: true, previewLoaded: loaded, syntaxErrors,
       runtimeErrors: this.diag.errors.slice(-30),
@@ -635,6 +812,7 @@ class PerchSession {
   async console({ clear = false } = {}) {
     if (!this.page) throw new Error('call perch_start first');
     this._touch();
+    await this._drainPageDiag().catch(() => {});
     const out = {
       ok: true,
       panel: (await this._readConsole()).slice(-6000),
@@ -650,7 +828,7 @@ class PerchSession {
       if (f === this.page.mainFrame()) continue;
       try {
         if (f.name() === 'console-output')
-          return await f.evaluate(() => document.body ? (document.body.innerText || document.body.textContent || '') : '');
+          return await evalMain(f, () => document.body ? (document.body.innerText || document.body.textContent || '') : '');
       } catch {}
     }
     try {
@@ -669,7 +847,7 @@ class PerchSession {
     // NOTE: the callback below is serialized and runs IN THE BROWSER — only
     // the argument object is in scope there, so nothing outer may be closed
     // over (v3 first cut returned the outer `frame` here and threw).
-    const out = await fr.evaluate(({ limit, filter }) => {
+    const out = await evalMain(fr, ({ limit, filter }) => {
       const cssPath = (el) => {
         if (el.id && /^[A-Za-z][\w-]*$/.test(el.id)) return '#' + el.id;
         const parts = [];
@@ -783,7 +961,7 @@ class PerchSession {
     if (!this.page) throw new Error('call perch_start first');
     this._touch();
     await this.page.setViewportSize({ width, height });
-    const rect = await this.page.evaluate(() => {
+    const rect = await evalMain(this.page, () => {
       const f = document.getElementById('outputIframeEl');
       if (!f) return null;
       const r = f.getBoundingClientRect();
@@ -854,7 +1032,7 @@ class PerchSession {
       if (!cf) break;
       await this.page.waitForTimeout(1500);
     }
-    const info = await this.page.evaluate(() => ({ url: location.href, title: document.title }))
+    const info = await evalMain(this.page, () => ({ url: location.href, title: document.title }))
       .catch(() => ({ url: null, title: null }));
     this.ready = false; // editor views are gone after leaving the editor page
     return {
@@ -876,7 +1054,7 @@ class PerchSession {
       return { ok: false, error: 'name must be a bare file name, e.g. README.md (folders not supported)' };
     const ed = await this._frame('editor');
     // 1. make sure the files panel is open
-    const panelOpen = await ed.evaluate(() => {
+    const panelOpen = await evalMain(ed, () => {
       const p = document.querySelector('#aiAgentPanelEl');
       return !!(p && p.innerText && (p.innerText.includes('upload') || p.innerText.includes('src')));
     }).catch(() => false);
@@ -887,7 +1065,7 @@ class PerchSession {
       await this.page.waitForTimeout(700);
     }
     // 2. inject the file via DataTransfer (callback runs IN THE BROWSER)
-    const r = await ed.evaluate(({ name, content }) => {
+    const r = await evalMain(ed, ({ name, content }) => {
       const input = document.querySelector('#aiAgentPanelEl input[data-ref="fileInput"]');
       if (!input) return { ok: false, error: 'src file input not found — open the files panel first' };
       const ext = (name.split('.').pop() || '').toLowerCase();
@@ -904,7 +1082,7 @@ class PerchSession {
     const t0 = Date.now();
     let saved = false;
     while (Date.now() - t0 < timeout) {
-      const txt = await ed.evaluate(() => {
+      const txt = await evalMain(ed, () => {
         const p = document.querySelector('#aiAgentPanelEl');
         return p ? (p.innerText || '') : '';
       }).catch(() => '');
@@ -920,6 +1098,7 @@ class PerchSession {
   }
 
   async stop() {
+    this._stopDiagDrain();
     if (this._idle) { clearInterval(this._idle); this._idle = null; }
     if (this.ctx) { try { await this.ctx.close(); } catch {} this.ctx = null; }
     if (this.browser) { try { await this.browser.close(); } catch {} this.browser = null; }

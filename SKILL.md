@@ -89,6 +89,10 @@ served from a per-user subdomain like `https://<32-hex>.perchance.org/<name>#edi
 `perch_start` args: `name` (required), `collabKey` (from `#edit:collab=KEY`),
 `headed` (default false), `engine` (`chromium` | `patchright`), `width`/`height`
 (default 1500×950), `force` (reload even if already on this generator).
+Results and `perch_status` also carry `effectiveEngine` — what is actually
+running (`patchright`, `patchright + chrome channel`, `playwright`, or
+`playwright (patchright module unavailable)` when the optional dependency is
+missing and the session silently runs the default engine).
 
 ### Recovery & src upload
 
@@ -189,6 +193,13 @@ clear, and reports `recoveryStep` plus a per-step `attempts` log.
   ```
 - If Cloudflare hard-blocks, try `engine: "patchright"`, then `headed: true`.
   On some networks `patchright` measures *worse* than plain chromium (default).
+- The `patchright` engine runs the patchright-recommended config (no custom
+  UA, no JS fingerprint injection; it tries the real Chrome channel first and
+  falls back to the bundled chromium build). Both engines share the same
+  tool surface: every evaluate reaches the page's MAIN world, and console /
+  pageerror diagnostics work under patchright via an in-page hook, so
+  `perch_status`, `perch_read`, `perch_grep`, `perch_eval`, and `perch_errors`
+  behave identically on either engine.
 
 ## Pitfalls that will bite you
 
