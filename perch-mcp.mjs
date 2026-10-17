@@ -48,7 +48,7 @@ const TOOLS = [
         name: { type: "string", description: "Generator name, e.g. 'minimal'" },
         collabKey: { type: "string", description: "Collab key from the editor URL hash (#edit:collab=KEY)" },
         headed: { type: "boolean", description: "Show a visible browser window. Default false" },
-        engine: { type: "string", enum: ["chromium", "patchright"], description: "Browser engine. 'patchright' = undetected playwright fork, used as the Cloudflare fallback. Default chromium" },
+        engine: { type: "string", enum: ["chromium", "patchright"], description: "Browser engine. 'patchright' = undetected playwright fork (stealth driver, DEFAULT; falls back to playwright when the optional module is absent). 'chromium' = plain playwright escape hatch" },
         width: { type: "integer", description: "Viewport width. Default 1500" },
         height: { type: "integer", description: "Viewport height. Default 950" },
         force: { type: "boolean", description: "Reload even if already on this generator" },

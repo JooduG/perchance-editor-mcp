@@ -192,7 +192,7 @@ class PerchSession {
     this.generator = null;
     this.collabKey = null;
     this.headed = null;      // true = visible window
-    this.engine = 'chromium';
+    this.engine = 'patchright';
     this.effectiveEngine = null; // what is actually running (channel / fallback)
     this._usingPatchright = false;
     this.ready = false;
@@ -494,7 +494,7 @@ class PerchSession {
     this._touch();
     const t0 = Date.now();
     if (!name) throw new Error('missing generator name');
-    if (engine) this.engine = engine; else this.engine = 'chromium';
+    if (engine) this.engine = engine; else this.engine = 'patchright'; // default: stealth driver (falls back to playwright when the optional module is absent)
     if (this.page && !force && this.ready && this.generator === name && this.collabKey === collabKey) {
       const s = await this.status();
       // Fall through to the ladder when the page is CF-blocked or the editor

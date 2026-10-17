@@ -6,7 +6,7 @@
   "main": "perch-mcp.mjs",
   "license": "MIT",
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "bin": {
     "perch-mcp": "perch-mcp.mjs"
@@ -18,9 +18,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
+    "patchright": "^1.64.0",
     "playwright": "^1.64.0"
-  },
-  "optionalDependencies": {
-    "patchright": "^1.63.0"
   }
 }

@@ -35,25 +35,25 @@ edits, `eval`, and UI testing.
 
 ## Install
 
-Requires **Node 18+** and **`curl` on `PATH`** (used for the browser-free path —
-on Windows 10+ `curl.exe` ships with the OS).
+Requires **Node 20+** (patchright 1.64 needs Node ≥ 20) and **`curl` on `PATH`** (used
+for the browser-free path — on Windows 10+ `curl.exe` ships with the OS).
 
 ```bash
 git clone https://github.com/Nightomaru/perchance-editor-mcp.git
 cd perchance-editor-mcp
 npm install
-npx playwright install chromium      # downloads the browser binary
+npx patchright install chromium     # browser binary for the DEFAULT stealth engine
+npx playwright install chromium     # only for the playwright fallback (optional)
 ```
 
-`npm install` pulls `@modelcontextprotocol/sdk` and `playwright`, and
-*optionally* `patchright` (an undetected playwright fork used only as a
-fallback engine against Cloudflare). If `patchright` fails to install,
-everything else still works — it is an optional dependency and the session
-degrades to plain `playwright` (reported as `effectiveEngine` by
-`perch_start`/`perch_status`, never silently). With patchright installed you
-can additionally run `npx patchright install chrome` so the patchright engine
-can use the real Chrome channel (it falls back to the bundled chromium build
-when Chrome is absent).
+`npm install` pulls `@modelcontextprotocol/sdk`, **patchright** (the DEFAULT browser
+engine — a patched, undetected Playwright fork that keeps sessions alive against
+Perchance's Cloudflare), and `playwright` (kept as the fallback driver). If
+`patchright` is missing or fails to launch, the session degrades to plain
+`playwright` (reported as `effectiveEngine` by `perch_start`/`perch_status`, never
+silently). Optionally run `npx patchright install chrome` so the patchright engine
+can use the real Chrome channel — it falls back to the bundled chromium build when
+Chrome is absent.
 
 Updating to a newer release: `git pull && npm install`.
 
@@ -221,7 +221,7 @@ perchance-editor-mcp/
 ├── perch-mcp.mjs        MCP server: tool schemas + DISPATCH map + stdio transport
 ├── perch-core.js        PerchSession: browser control, CF ladder, API pulls, all 27 impls
 ├── SKILL.md             agent operating manual: tools, recipe, pitfalls, CF playbook
-├── package.json         deps: @modelcontextprotocol/sdk, playwright (patchright optional)
+├── package.json         deps: @modelcontextprotocol/sdk, patchright (default engine), playwright (fallback)
 ├── LICENSE              MIT
 ├── .gitignore           node_modules, .perch-mirror, test/out, screenshots
 ├── test/
@@ -232,6 +232,28 @@ perchance-editor-mcp/
 
 Generated at runtime (gitignored): `.perch-mirror/`, `test/out/`,
 `perch_shot.png`.
+
+---
+
+## Credits
+
+`perch-mcp` stands on these open-source projects — thank you to their authors
+and contributors:
+
+* [patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright) — the patched,
+  undetected Playwright fork that powers the **default browser engine**
+  ([Apache-2.0](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright/blob/main/LICENSE)).
+* [Playwright](https://github.com/microsoft/playwright) — the browser automation
+  core both engines descend from, and the fallback driver
+  ([Apache-2.0](https://github.com/microsoft/playwright/blob/main/LICENSE)).
+* [Model Context Protocol TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk)
+  — the MCP server framework and stdio transport
+  ([MIT](https://github.com/modelcontextprotocol/typescript-sdk/blob/main/LICENSE)).
+* [Perchance.org](https://perchance.org) — the generator platform (and its
+  `ai-text-plugin` / `text-to-image-plugin` runtime) that this server drives.
+
+Their licenses apply to the respective components; everything else in this
+repository is MIT (see [LICENSE](LICENSE)).
 
 ---
 
