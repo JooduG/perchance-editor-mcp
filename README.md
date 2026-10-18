@@ -24,7 +24,6 @@ edits, `eval`, and UI testing.
 
 ## Table of contents
 
-- [MCP protocol: v2, modern-only](#mcp-protocol-v2-modern-only)
 - [Install](#install)
 - [Registering the server](#registering-the-server)
 - [Quick start](#quick-start)
@@ -34,35 +33,6 @@ edits, `eval`, and UI testing.
 - [Files](#files)
 - [Credits](#credits)
 - [License](#license)
-
----
-
-## MCP protocol: v2, modern-only
-
-Since v2.0.0 this server speaks MCP `2026-07-28` — the "v2" generation — and it
-is **modern-only**. What changed from the v1 era (`2025-11-25` and earlier):
-
-| | v1 era (≤ 2025-11-25) | v2: `2026-07-28` (this repo) |
-|---|---|---|
-| Connection | `initialize`/`initialized` handshake, then a session | no handshake — every request self-describes |
-| State | `Mcp-Session-Id` header, held-open bidirectional streams | stateless request/response; app state via explicit handles |
-| Capabilities | learned once at handshake | `server/discover` RPC, callable at any time |
-| Envelope | bare JSON-RPC params | required `_meta` (`io.modelcontextprotocol/protocolVersion` + capabilities) |
-| Results | plain result objects | required `resultType` (`"complete"` / `"input_required"`) |
-| Server→client calls | sampling/elicitation/roots on a held-open stream | Multi Round-Trip Requests (MRTR) |
-| Legacy v1 clients | served | rejected with `-32022 UnsupportedProtocolVersion` |
-
-Practical consequences:
-
-- Any client that speaks `2026-07-28` works as-is.
-- A v1-only client's `initialize` fails with `-32022`.
-  **Hermes handles this automatically** — its `protocol: auto` mode falls back
-  to `server/discover` on `-32022`. Clients that cannot speak the modern
-  protocol should pin the [`v1.1.0`](https://github.com/Nightomaru/perchance-editor-mcp/releases/tag/v1.1.0)
-  tag, the last legacy-handshake server (built on `@modelcontextprotocol/sdk` 1.32.1).
-- Perch session state (the browser) lives in the long-lived server process,
-  not in the transport, so the stateless protocol changes nothing about how
-  the tools behave.
 
 ---
 
