@@ -1,7 +1,7 @@
 ---
 name: perchance-editor
 description: "Use when reading, editing, or live-testing a Perchance.org generator through the perch MCP server."
-version: 1.0.0
+version: 2.1.0
 author: Nightomaru
 license: MIT
 platforms: [linux, macos, windows]
@@ -67,6 +67,38 @@ The live preview (the running generator) is the subframe **`#outputIframeEl`**,
 served from a per-user subdomain like `https://<32-hex>.perchance.org/<name>#edit`.
 
 
+## MCP protocol version (v2, modern-only)
+
+Since v2.0.0 the repo ships ONE server, speaking the current MCP spec
+`2026-07-28` — the "v2" generation (stateless core: no `initialize` handshake,
+`server/discover` for capabilities, a required `_meta` envelope on every
+request, `resultType` on every result). It is **modern-only**: a
+legacy-handshake client's `initialize` is answered with
+`-32022 UnsupportedProtocolVersion`. The last legacy-handshake server (SDK
+`@modelcontextprotocol/sdk` 1.32.1, protocol `2025-11-25`) is preserved at git
+tag `v1.1.0`.
+
+Hermes speaks both eras — `LATEST_HANDSHAKE_VERSION = 2025-11-25`,
+`LATEST_PROTOCOL_VERSION = 2026-07-28` (from the installed Python `mcp` SDK):
+
+- `protocol: auto` (default) tries the legacy handshake first, then falls back
+  to `server/discover` on `-32022` / method-not-found — so this server needs
+  **no config change**.
+- `protocol: stateless|modern|2026-07-28` forces discover-first; `legacy` is
+  handshake-only and will NOT connect to this server.
+- Seed `MCP-Protocol-Version` from `LATEST_HANDSHAKE_VERSION`, never
+  `LATEST_PROTOCOL_VERSION`, or the handshake lands on the envelope ladder and
+  is rejected.
+
+### Upgrading an MCP server to v2 (TypeScript) — procedure
+
+1. Install `@modelcontextprotocol/server` (+ `@modelcontextprotocol/node`, `zod >= 4.2`); drop the monolithic `@modelcontextprotocol/sdk`.
+2. Replace `Server` + `StdioServerTransport` + manual `setRequestHandler(ListTools/CallTool)` with `McpServer` and `serveStdio(factory, opts)`.
+3. Convert each tool's JSON Schema `inputSchema` with `fromJsonSchema(...)`; register with `server.registerTool(name, {description, inputSchema}, cb)`.
+4. The callback receives `(args, ctx)` and must return a `CallToolResult` — `{content:[{type:'text', text: JSON.stringify(result)}]}`. The SDK no longer wraps a raw object; wrap it yourself (and keep the `ms` timing field).
+5. `serveStdio(factory, opts)` returns a `StdioServerHandle` **synchronously** — it is NOT a Promise. Do not `.catch()` it; route errors through the `onerror` option.
+6. `legacy: "reject"` makes the server modern-only (2026-07-28); omit it (default `'serve'`) to keep serving v1 clients too.
+
 ## Tool set (27)
 
 ### Browser-free — no session, no collab key
@@ -93,6 +125,23 @@ Results and `perch_status` also carry `effectiveEngine` — what is actually
 running (`patchright`, `patchright + chrome channel`, `playwright`, or
 `playwright (patchright module unavailable)` when the optional dependency is
 missing and the session silently runs the default engine).
+
+**Engine default: `patchright`** (stealth driver) since 2026-10-17 — the owner
+flipped it in `perch-core.js` `start()` after repeated CF stalls on the default
+chromium. Notes:
+- patchright runs its bundled chromium when the `chrome` channel is absent (a
+  machine without system Chrome reports `effectiveEngine: "patchright"`, not
+  `"patchright + chrome channel"`) — probe first with
+  `node -e "require('patchright').chromium.launch({channel:'chrome'})...` from the
+  server dir if launches fail.
+- It hardens the fingerprint for CF challenges (page + collab WS handshakes), but
+  it canNOT fix `ERR_BLOCKED_BY_RESPONSE` / X-Frame-Options embed blocks — those
+  are perchance's own frame headers, not challenges.
+- The skill's own caveat stands: on some networks patchright measures *worse*;
+  pass `engine: "chromium"` per-call to A/B it.
+- The running MCP server reads `engine` per-call, but a `perch-core.js` default
+  change needs an MCP server restart (`/reload-mcp` or a new session) to become
+  the no-arg default.
 
 ### Recovery & src upload
 
@@ -165,6 +214,40 @@ never as "deployed". An owner save publishes `model`, `output`, and the `src/`
 manifest in one go. Also: a collab key is a credential. Pass it as an argument;
 never commit, log, or echo it into a file.
 
+## Verifying unsaved collab edits visually
+
+The preview renders the SAVED generator, so a collab edit cannot be seen by
+refreshing it. To exercise a UI change before the owner saves, simulate it in
+the live preview and verify with numbers, not eyes:
+
+1. Boot at the target width FIRST. Generators commonly pick a mobile/desktop
+   mode once at load (a body class from `innerWidth`) and never re-evaluate it
+   on resize. `perch_start` accepts `width`/`height` — boot the editor sized so
+   the PREVIEW iframe hits the device width, or the preview boots in the wrong
+   mode and the session carries a hybrid layout. `perch_set_viewport` sizes the
+   editor PAGE, not the iframe: read its returned `iframe` rect and widen until
+   the iframe matches the target.
+2. `perch_eval` in `preview`: append a `<style>` holding the new CSS, stub any
+   element the new markup would add, apply the class/logic the new JS would,
+   and remove what the edit deletes. Tag the injected node with a fixed id so
+   the injection is re-runnable and updatable in place.
+   **Append the style to `document.body`, not `head`** — the generator's own
+   `<style>` blocks live in body, so a head-appended sheet is EARLIER in
+   document order and loses every specificity tie against them (injection
+   silently no-ops while `styleSheet` checks still pass). After moving the
+   node, re-read a computed value that the patch should change to confirm the
+   cascade actually flipped.
+3. Assert with `getComputedStyle` (radius/background/box-shadow),
+   `getBoundingClientRect` (centering, width caps) and element counts;
+   `perch_shot` only for the human. Report the render as an injection into the
+   saved code, never as the deployed result.
+4. To test the other mode's cascade from a wrong-boot preview, flip the boot
+   class in the eval (`document.body.classList.remove('isMobile')`) instead of
+   reloading: a preview reload is a fresh cross-subdomain iframe navigation,
+   which Cloudflare can hard-block (`chrome-error://chromewebdata/`) and a
+   blocked embed never recovers by retrying — recover with
+   `perch_start {force: true}` (see playbook) and re-inject.
+
 ## Cloudflare playbook
 
 perchance.org sits behind Cloudflare and flagging is **probabilistic and
@@ -191,8 +274,10 @@ clear, and reports `recoveryStep` plus a per-step `attempts` log.
   perch_navigate {url: "https://text-generation.perchance.org/embed"}   # let the challenge render & clear
   perch_start    {name, collabKey, force: true}                         # back to the editor, cookies now cleared
   ```
-- If Cloudflare hard-blocks, try `engine: "patchright"`, then `headed: true`.
-  On some networks `patchright` measures *worse* than plain chromium (default).
+- If Cloudflare hard-blocks, the default `patchright` engine usually clears it
+  via its ladder; escalate with `headed: true` if not. A per-call
+  `engine: "chromium"` A/B is worth one try — on some networks patchright
+  measures *worse* than plain chromium.
 - The `patchright` engine runs the patchright-recommended config (no custom
   UA, no JS fingerprint injection; it tries the real Chrome channel first and
   falls back to the bundled chromium build). Both engines share the same
@@ -233,6 +318,29 @@ clear, and reports `recoveryStep` plus a per-step `attempts` log.
    throws `ReferenceError`; pass everything through `arg`.
 10. **The live document may not be what the URL "looks like".** Always confirm
     with `perch_grep`/`perch_read` before anchoring an edit on assumed text.
+11. **The collab WebSocket can silently die mid-session** (`wss://editor-collab.perchance.org` 403
+    handshakes -> `perch_status` shows `collabSynced: false`). Unsynced edits live only in that
+    page's buffer: waiting rarely helps, and a reload loses them. Recovery that worked:
+    re-apply-from-local — the edits exist in the local working copy, so `perch_stop` + fresh
+    `perch_start` (its CF ladder clears the block), then grep the room for each hunk's anchor
+    (partially-synced batches leave earlier hunks already applied) and `perch_patch` only the
+    missing ones. Keep tool calls flowing: the browser closes after ~20 min idle.
+12. **Verifying unsaved collab edits visually**: the preview iframe renders the SAVED state,
+    but you can inject the new CSS (and simulate new-template DOM via JS) into the live preview
+    with `perch_eval`, then `perch_set_viewport` + `perch_shot`. Do NOT `location.reload()` the
+    preview iframe — a fresh cross-subdomain iframe navigation gets CF-blocked
+    (`chrome-error://chromewebdata`) and cannot recover in-frame; recover per the playbook.
+    Keep evals synchronous or fully-guarded: a throw inside a `setTimeout` leaves the eval's
+    promise pending and the call times out at 300s.
+13. **Layout traps when restyling the chat**: `#messageFeed` is a flex item in
+     `#builtInChatInterfaceWrapper`'s COLUMN — `margin: 0 auto` alone shrink-wraps it to its
+     widest message (auto inline margins absorb the cross-axis free space); use `width: 100%`.
+     `#inputWrapper` is ABSPOS (`left/right: 0.5rem`) — never give it a `width` (over-constrains
+     it past the feed); cap with `max-width` + auto margins. Its inline `padding` needs
+     `!important` to override. `showEl/hideEl` round-trip relies on the stylesheet's display
+     rule (e.g. `#messageFeedOpenLeftColumnButton`): never add a `display: none !important` to
+     such a button — it makes the element unreachable after a hide/show cycle.
+14. **`serveStdio` is not a Promise.** In the v2 SDK it returns a `StdioServerHandle` synchronously — calling `.catch()` on it throws `TypeError: serveStdio(...).catch is not a function`. Route failures through the `onerror` option instead.
 
 ## UI testing without screenshots
 
@@ -259,6 +367,14 @@ node test/smoke-core.mjs                       # perch-core.js directly, public 
 node test/smoke-mcp.mjs                        # the server over real stdio JSON-RPC
 node test/smoke-mcp.mjs my-generator MYKEY     # against your own generator
 ```
+
+`smoke-mcp` is a MODERN client (2026-07-28): it calls `server/discover` first,
+sends the required `_meta` envelope (`io.modelcontextprotocol/protocolVersion` +
+`clientCapabilities` + `clientInfo`) on every request, asserts that a legacy
+`initialize` is rejected with `-32022`, and checks `resultType: "complete"` on
+every result. A bare request without the envelope is rejected with
+`modern-only-missing-envelope` — that is the server enforcing the spec, not a
+bug.
 
 A minimal live round-trip against a real generator, using the tools directly:
 
@@ -287,7 +403,7 @@ key to test with) — and revert it in the same session.
   never `/c/…` or `/tmp/…`.
 - `curl.exe` ships with Windows 10+ and is what the browser-free path uses.
 - Give the server a generous timeout — a full CF ladder can outlast short
-  ceilings (`hermes mcp add perch --command "C:/Program Files/nodejs/node.exe"
+  ceilings (`hermes mcp add perch --command "C:/Program Files/nodejs/node.exe"`
   --connect-timeout 120 --args "<repo>/perch-mcp.mjs"`).
 
 ## Adding a tool
@@ -299,6 +415,22 @@ key to test with) — and revert it in the same session.
 `perch-mcp.mjs` already wraps every result in JSON, adds `ms`, and turns a throw
 into `{ok: false, error}` — no new plumbing. Restart the MCP client so it
 re-lists tools, then run `node test/smoke-mcp.mjs`.
+
+## Maintenance / publishing (this repo)
+
+- **Run `npm run test:core` before pushing** any engine/dependency change — it
+  drives the DEFAULT engine through the whole surface (pull, CF ladder, eval,
+  screenshot), which is the only real proof a default flip works.
+- **Probe the engine launch before committing a default flip**: the
+  `channel: 'chrome'` path needs system Chrome (absent on some machines — the
+  bundled chromium build is the working path there).
+- **When promoting a driver to a hard dependency, check its `engines` field**:
+  patchright 1.64 requires Node ≥ 20, so `package.json` `engines`, the README
+  install line, and the dependency move must land together.
+- **Credit engines/SDKs with URLs + licenses read from the INSTALLED packages'
+  `package.json`** (`node -e "require('…/package.json')"`) — the org name is not
+  guessable (patchright lives under `Kaliiiiiiiiii-Vinyzu` and is easy to
+  misspell from memory), and the license belongs in the README credits.
 
 ## Security
 

@@ -1,7 +1,7 @@
 {
-  "name": "perch-mcp",
-  "version": "1.1.0",
-  "description": "MCP server that gives an AI agent full read/write control of a Perchance.org generator's live editor, plus browser-free source access.",
+  "name": "perch-mcp-v2",
+  "version": "2.0.0",
+  "description": "MCP v2 (2026-07-28 stateless) server: read/write control of a Perchance.org generator's live editor.",
   "type": "commonjs",
   "main": "perch-mcp.mjs",
   "license": "MIT",
@@ -17,7 +17,8 @@
     "test:mcp": "node test/smoke-mcp.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@modelcontextprotocol/server": "^2.3.1",
+    "@modelcontextprotocol/node": "^2.1.1",
     "patchright": "^1.64.0",
     "playwright": "^1.64.0"
   }

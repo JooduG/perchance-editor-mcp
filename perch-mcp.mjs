@@ -20,12 +20,8 @@
 //   * preview-frame resolution that makes eval/click/type/shot all work.
 //   * CF auto-escalation ladder inside perch_start.
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
+import { McpServer, fromJsonSchema } from "@modelcontextprotocol/server";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
@@ -399,31 +395,37 @@ const DISPATCH = {
   perch_upload_src: (a) => session.uploadSrc(a),
 };
 
-const server = new Server(
-  { name: "perch", version: "1.1.0" },
-  { capabilities: { tools: {} } }
-);
-
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
-
-server.setRequestHandler(CallToolRequestSchema, async (req) => {
-  const { name, arguments: args } = req.params;
-  const fn = DISPATCH[name];
-  let result;
-  const t0 = Date.now();
-  try {
-    result = fn ? await fn(args || {}) : { ok: false, error: "unknown tool: " + name };
-  } catch (e) {
-    result = { ok: false, error: String((e && e.message) || e) };
+// ----------------------------- server factory (MCP v2) -----------------------------
+function createServer() {
+  const server = new McpServer({ name: "perch", version: "2.0.0" }, { capabilities: { tools: {} } });
+  for (const tool of TOOLS) {
+    server.registerTool(
+      tool.name,
+      { description: tool.description, inputSchema: fromJsonSchema(tool.inputSchema) },
+      async (args) => {
+        const fn = DISPATCH[tool.name];
+        const t0 = Date.now();
+        try {
+          const result = await fn(args || {});
+          result.ms = Date.now() - t0;
+          return { content: [{ type: "text", text: JSON.stringify(result) }] };
+        } catch (e) {
+          return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: String((e && e.message) || e), ms: Date.now() - t0 }) }] };
+        }
+      }
+    );
   }
-  result.ms = Date.now() - t0;
-  return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  return server;
+}
+
+// Modern-only (MCP 2026-07-28): legacy 'reject' makes a v1 client's initialize fail with
+// -32022 (UnsupportedProtocolVersion), which Hermes 'auto' mode detects and falls back to
+// server/discover (the modern path).
+serveStdio(createServer, {
+  legacy: "reject",
+  onerror: (e) => { console.error("[perch] serveStdio error:", (e && e.message) || e); },
 });
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
-
-// Never let a stray detached-frame rejection kill the server process.
 process.on("unhandledRejection", (e) => {
   console.error("[perch] unhandled rejection:", (e && e.message) || e);
 });
