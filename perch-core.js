@@ -1042,58 +1042,300 @@ class PerchSession {
     };
   }
 
-  // ---------------- src/ upload (proven against the live editor) ----------------
+  // ---------------- src/ upload + delete (proven against the live editor) ----------------
   // Uploads a file into the generator's src/ through the editor's file panel.
   // The src-tree uploader is <input data-ref="fileInput"> inside #aiAgentPanelEl;
   // #aiAgentFileInputEl is the AI-helper CHAT attachment input — do not confuse
   // them (attaching there does NOT create a src file).
-  async uploadSrc({ name, content = '', timeout = 25000 } = {}) {
+  //
+  // Names may carry virtual folders ('emoji/icon.svg'): the src store is a flat
+  // string-keyed manifest, the tree groups '/' keys into folders, and the
+  // editor's upload handler keeps the full path (probed live 2026-10-19).
+  // Re-uploading an existing path never overwrites: the editor RENAMES the
+  // incoming file (name-2.ext) behind a modal notice. overwrite:true runs the
+  // delete flow first — a staged delete clears the collision check, so the
+  // re-upload lands on the exact same key (probed live).
+  _validSrcName(name) {
+    if (typeof name !== 'string' || !name.trim().length) return 'name is required';
+    if (name !== name.trim()) return 'no leading/trailing whitespace';
+    if (name.includes('\\')) return "use forward slashes: 'emoji/icon.svg'";
+    if (name.startsWith('/') || name.endsWith('/')) return 'no leading/trailing slash';
+    if (name.includes('//')) return 'empty path segment';
+    const segs = name.split('/');
+    if (segs.length > 8) return 'max 8 path segments';
+    for (const seg of segs) {
+      if (seg === '.' || seg === '..') return "dot segments are not allowed: '" + seg + "'";
+      if (!/^[\w][\w .()-]{0,127}$/.test(seg)) return "segment '" + seg + "' may only hold letters/digits/_ . - ( ) and spaces, starting with a letter, digit or _";
+      if (/[ .]$/.test(seg)) return "segment '" + seg + "' may not end with a space or dot";
+    }
+    if (name.length > 240) return 'path too long (max 240 chars)';
+    return null;
+  }
+
+  async _ensureFilesPanel(ed) {
+    // The helper chat view also contains the word "upload" (its 📤 button), so
+    // check for the files view's actual markup instead: the src file input only
+    // exists when the file tree is showing.
+    const inputVisible = () => evalMain(ed, () => {
+      const p = document.querySelector('#aiAgentPanelEl');
+      return !!(p && p.querySelector('input[data-ref="fileInput"]'));
+    }).catch(() => false);
+    if (await inputVisible()) return true;
+    try {
+      await ed.locator('text=🗂 files').first().click({ timeout: 5000 });
+    } catch { return false; }
+    await this.page.waitForTimeout(700);
+    return inputVisible();
+  }
+
+  _curlBuffer(url) {
+    const { execFileSync } = require('child_process');
+    return execFileSync('curl', ['-s', '-L', '-A', UA, url],
+      { timeout: 120000, maxBuffer: 256 * 1024 * 1024, encoding: 'buffer' });
+  }
+
+  // Resolve the upload source to exactly one of: inline content (small text only
+  // — it transits the calling model's context), an absolute local filePath (read
+  // server-side, byte-exact, nothing transits), or a https url (fetched
+  // server-side). Binary handling is inferred from the extension unless forced.
+  _readUploadSource({ content, filePath, url, binary }) {
+    const TEXT_EXTS = ['md', 'txt', 'js', 'mjs', 'cjs', 'json', 'jsonl', 'html', 'htm', 'css', 'svg', 'xml',
+      'csv', 'ts', 'tsx', 'jsx', 'yaml', 'yml', 'toml', 'ini', 'webmanifest', 'pjs'];
+    const BINARY_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'ico', 'bmp', 'woff', 'woff2', 'ttf',
+      'otf', 'eot', 'mp3', 'wav', 'ogg', 'm4a', 'mp4', 'webm', 'mov', 'zip', 'gz', 'tgz', 'pdf', 'wasm', 'bin', 'dat'];
+    // content counts only when non-empty: the caller's cached tool schema may
+    // still require a `content` argument, so `content: ""` + filePath/url is the
+    // supported way to use a server-side source through an old client schema
+    const given = [!!content, !!filePath, !!url].filter(Boolean).length;
+    if (given === 0) return { error: 'one of content, filePath or url is required' };
+    if (given > 1) return { error: 'pass only ONE of content, filePath or url' };
+    let ext = '';
+    if (filePath) {
+      if (typeof filePath !== 'string' || !(/^[A-Za-z]:[\\/]/.test(filePath) || filePath.startsWith('/'))) {
+        return { error: 'filePath must be an ABSOLUTE path (the server process has no reliable working directory), e.g. C:/Users/you/Workspace/app/src/emoji/x.svg' };
+      }
+      const fs = require('fs');
+      if (!fs.existsSync(filePath)) return { error: 'filePath does not exist: ' + filePath };
+      ext = (filePath.split('.').pop() || '').toLowerCase();
+      const isBinary = binary !== undefined ? !!binary : BINARY_EXTS.includes(ext);
+      const buf = fs.readFileSync(filePath);
+      if (isBinary) return { base64: buf.toString('base64'), bytes: buf.length, ext, source: 'file' };
+      return { text: buf.toString('utf8'), bytes: buf.length, ext, source: 'file' };
+    }
+    if (url) {
+      if (!/^https?:\/\//i.test(url)) return { error: 'url must start with http(s)://' };
+      try { ext = (new URL(url)).pathname.split('.').pop().toLowerCase(); } catch { ext = ''; }
+      const isBinary = binary !== undefined ? !!binary : (BINARY_EXTS.includes(ext) && !TEXT_EXTS.includes(ext));
+      let buf;
+      try { buf = this._curlBuffer(url); } catch (e) { return { error: 'url fetch failed: ' + e.message }; }
+      if (!buf || !buf.length) return { error: 'url fetch returned an empty body: ' + url };
+      if (isBinary) return { base64: buf.toString('base64'), bytes: buf.length, ext, source: 'url' };
+      return { text: buf.toString('utf8'), bytes: buf.length, ext, source: 'url' };
+    }
+    const text = String(content);
+    return { text, bytes: Buffer.byteLength(text), ext: '', source: 'content' };
+  }
+
+  // Shared row-menu delete flow. Row matching is TEXT-anchored (the ⋯ button whose
+  // small row contains the file name): published tree rows carry no span[title]
+  // and their name spans include the 📄 prefix, so title/exact-text lookups miss
+  // them. Returns {existed, deleted?, error?} — existed:false means no such row.
+  async _deleteSrcRow(ed, path, { timeout = 20000 } = {}) {
+    const findRow = (fnName) => evalMain(ed, ({ path }) => {
+      const panel = document.querySelector('#aiAgentPanelEl');
+      if (!panel) return { ok: false, error: 'files panel not found' };
+      const fname = path.split('/').pop();
+      const btns = [...panel.querySelectorAll('button')].filter(b => (b.title || '').indexOf('download / rename / delete') !== -1);
+      for (const b of btns) {
+        let row = b.parentElement;
+        for (let i = 0; i < 4 && row && row !== panel; i++) {
+          const t = row.textContent || '';
+          if (t.indexOf(fname) !== -1 && t.length < 160) return { ok: true, found: true };
+          row = row.parentElement;
+        }
+      }
+      // not rendered: expand the first folder segment if the path has one
+      const segs = path.split('/');
+      if (segs.length > 1) {
+        const folderSpan = [...panel.querySelectorAll('span')].find(el => (el.textContent || '').trim() === '▸ 📁 ' + segs[0]);
+        if (folderSpan) { (folderSpan.closest('div') || folderSpan).click(); return { ok: true, found: false, expanded: true }; }
+      }
+      return { ok: true, found: false };
+    }, { path }).catch(e => ({ ok: false, error: String(e && e.message || e) }));
+    let probe = await findRow(path);
+    if (!probe.ok) return { existed: false, error: probe.error };
+    if (!probe.found) {
+      if (probe.expanded) await this.page.waitForTimeout(900);
+      probe = await findRow(path);
+      if (!probe.ok) return { existed: false, error: probe.error };
+      if (!probe.found) return { existed: false };
+    }
+    // open the row's ⋯ menu
+    const menu = await evalMain(ed, ({ path }) => {
+      const panel = document.querySelector('#aiAgentPanelEl');
+      const fname = path.split('/').pop();
+      const btns = [...panel.querySelectorAll('button')].filter(b => (b.title || '').indexOf('download / rename / delete') !== -1);
+      for (const b of btns) {
+        let row = b.parentElement;
+        for (let i = 0; i < 4 && row && row !== panel; i++) {
+          const t = row.textContent || '';
+          if (t.indexOf(fname) !== -1 && t.length < 160) { b.click(); return { ok: true }; }
+          row = row.parentElement;
+        }
+      }
+      return { ok: false, error: 'row menu button (⋯) not found' };
+    }, { path });
+    if (!menu.ok) return { existed: true, error: menu.error };
+    await this.page.waitForTimeout(700);
+    // the menu is a document-level popup: childless div, exact "🗑️ delete"
+    const del = await evalMain(ed, () => {
+      const txt = String.fromCodePoint(0x1F5D1) + String.fromCodePoint(0xFE0F) + ' delete';
+      const item = [...document.querySelectorAll('div')].filter(el => el.offsetParent !== null && el.childElementCount === 0 && (el.textContent || '').trim() === txt).pop();
+      if (!item) return { ok: false, error: 'delete item not found (menu closed?)' };
+      item.click();
+      return { ok: true };
+    });
+    if (!del.ok) return { existed: true, error: del.error };
+    await this.page.waitForTimeout(700);
+    // confirm modal inside the panel ("Delete src/…?"), ok is its last button
+    const confirm = await evalMain(ed, () => {
+      const panel = document.querySelector('#aiAgentPanelEl');
+      const overlays = [...panel.querySelectorAll('div')].filter(d => {
+        const s = d.style || {};
+        return s.position === 'absolute' && d.offsetParent !== null && (d.innerText || '').length > 0 && (d.innerText || '').length < 400;
+      });
+      const ov = overlays[overlays.length - 1];
+      if (!ov || (ov.innerText || '').indexOf('Delete') === -1) return { ok: false, error: 'confirm modal not found' };
+      const btns = [...ov.querySelectorAll('button')];
+      const okBtn = btns.find(b => /^ok$/i.test((b.textContent || '').trim())) || btns[btns.length - 1];
+      if (!okBtn) return { ok: false, error: 'confirm button not found' };
+      okBtn.click();
+      return { ok: true };
+    });
+    if (!confirm.ok) return { existed: true, error: confirm.error };
+    // the staged delete removes the row at once — verify it is gone
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeout) {
+      const gone = await evalMain(ed, ({ path }) => {
+        const panel = document.querySelector('#aiAgentPanelEl');
+        const fname = path.split('/').pop();
+        const btns = [...panel.querySelectorAll('button')].filter(b => (b.title || '').indexOf('download / rename / delete') !== -1);
+        for (const b of btns) {
+          let row = b.parentElement;
+          for (let i = 0; i < 4 && row && row !== panel; i++) {
+            const t = row.textContent || '';
+            if (t.indexOf(fname) !== -1 && t.length < 160) return { gone: false };
+            row = row.parentElement;
+          }
+        }
+        return { gone: true };
+      }, { path }).catch(() => null);
+      if (gone && gone.gone) return { existed: true, deleted: true };
+      await this.page.waitForTimeout(800);
+    }
+    return { existed: true, deleted: false, error: 'row still present after confirm (check the editor and retry)' };
+  }
+
+  async deleteSrc({ path, timeout = 20000 } = {}) {
     if (!this.page) throw new Error('call perch_start first');
     this._touch();
-    if (!name || /[\\\/]/.test(name))
-      return { ok: false, error: 'name must be a bare file name, e.g. README.md (folders not supported)' };
+    const bad = this._validSrcName(path);
+    if (bad) return { ok: false, error: bad };
     const ed = await this._frame('editor');
-    // 1. make sure the files panel is open
-    const panelOpen = await evalMain(ed, () => {
-      const p = document.querySelector('#aiAgentPanelEl');
-      return !!(p && p.innerText && (p.innerText.includes('upload') || p.innerText.includes('src')));
-    }).catch(() => false);
-    if (!panelOpen) {
-      try {
-        await ed.locator('text=🗂 files').first().click({ timeout: 5000 });
-      } catch { return { ok: false, error: 'could not open the files panel' }; }
-      await this.page.waitForTimeout(700);
+    if (!(await this._ensureFilesPanel(ed))) return { ok: false, error: 'could not open the files panel' };
+    const r = await this._deleteSrcRow(ed, path, { timeout });
+    if (!r.existed) return { ok: false, error: 'src path not in the file tree: ' + path };
+    return {
+      ok: !!r.deleted,
+      deleted: !!r.deleted,
+      path,
+      error: r.error,
+      hint: r.deleted ? 'staged in the editor store; visitors see it once the generator owner saves' : undefined,
+    };
+  }
+
+  async uploadSrc({ name, content, filePath, url, binary, timeout = 25000, overwrite = false } = {}) {
+    if (!this.page) throw new Error('call perch_start first');
+    this._touch();
+    const bad = this._validSrcName(name);
+    if (bad) return { ok: false, error: bad };
+    const src = this._readUploadSource({ content, filePath, url, binary });
+    if (src.error) return { ok: false, error: src.error };
+    if (src.bytes > 64 * 1024 * 1024) return { ok: false, error: 'file too large for the panel uploader (>64MB): ' + src.bytes + ' bytes' };
+    const ed = await this._frame('editor');
+    if (!(await this._ensureFilesPanel(ed))) return { ok: false, error: 'could not open the files panel' };
+    // Overwrite = delete the existing entry first (see the header comment).
+    let overwrote = false;
+    if (overwrite) {
+      const del = await this._deleteSrcRow(ed, name);
+      if (del.existed && !del.deleted) {
+        return { ok: false, error: 'could not delete the existing file before overwrite' + (del.error ? ': ' + del.error : '') };
+      }
+      overwrote = !!del.existed;
     }
-    // 2. inject the file via DataTransfer (callback runs IN THE BROWSER)
-    const r = await evalMain(ed, ({ name, content }) => {
+    // inject the file via DataTransfer (callback runs IN THE BROWSER); binary
+    // arrives base64-encoded and is decoded to real bytes page-side
+    const r = await evalMain(ed, ({ name, content, base64 }) => {
       const input = document.querySelector('#aiAgentPanelEl input[data-ref="fileInput"]');
       if (!input) return { ok: false, error: 'src file input not found — open the files panel first' };
       const ext = (name.split('.').pop() || '').toLowerCase();
       const mime = { md: 'text/markdown', txt: 'text/plain', js: 'text/javascript', mjs: 'text/javascript',
-        json: 'application/json', html: 'text/html', css: 'text/css' }[ext] || 'text/plain';
+        json: 'application/json', html: 'text/html', css: 'text/css', svg: 'image/svg+xml',
+        xml: 'application/xml', csv: 'text/csv', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+        gif: 'image/gif', webp: 'image/webp', avif: 'image/avif', ico: 'image/x-icon',
+        woff: 'font/woff', woff2: 'font/woff2', ttf: 'font/ttf', otf: 'font/otf',
+        mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', mp4: 'video/mp4', webm: 'video/webm',
+        zip: 'application/zip', pdf: 'application/pdf', wasm: 'application/wasm' }[ext] || 'text/plain';
+      let payload = content;
+      if (base64) {
+        const bin = atob(content);
+        const u8 = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+        payload = u8;
+      }
       const dt = new DataTransfer();
-      dt.items.add(new File([content], name, { type: mime }));
+      dt.items.add(new File([payload], name, { type: mime }));
       input.files = dt.files;
       input.dispatchEvent(new Event('change', { bubbles: true }));
       return { ok: true };
-    }, { name, content });
+    }, { name, content: src.base64 || src.text, base64: !!src.base64 });
     if (!r.ok) return r;
-    // 3. wait for the tree to mark the file saved
+    // wait for the tree to mark the file saved — and catch the editor's
+    // collision rename ("Some files were renamed (name already taken…)")
     const t0 = Date.now();
     let saved = false;
+    let renamedTo = null;
     while (Date.now() - t0 < timeout) {
-      const txt = await evalMain(ed, () => {
-        const p = document.querySelector('#aiAgentPanelEl');
-        return p ? (p.innerText || '') : '';
-      }).catch(() => '');
-      if (txt.includes(name) && /saved/i.test(txt)) { saved = true; break; }
+      const state = await evalMain(ed, ({ name }) => {
+        const panel = document.querySelector('#aiAgentPanelEl');
+        const txt = panel ? (panel.innerText || '') : '';
+        let renamed = null;
+        const overlays = [...panel.querySelectorAll('div')].filter(d => {
+          const s = d.style || {};
+          return s.position === 'absolute' && d.offsetParent !== null && (d.innerText || '').indexOf('were renamed') !== -1;
+        });
+        const ov = overlays[overlays.length - 1];
+        if (ov) {
+          const m = (ov.innerText || '').match(/([\w./-]+)\s+→\s+([\w./-]+)/);
+          if (m) renamed = m[2];
+          const okBtn = [...ov.querySelectorAll('button')].pop();
+          if (okBtn) okBtn.click(); // dismiss so later calls are not blocked
+        }
+        return { txt, renamed };
+      }, { name }).catch(() => null);
+      if (state && state.renamed) { renamedTo = state.renamed; break; }
+      if (state && state.txt.includes(name) && /saved/i.test(state.txt)) { saved = true; break; }
       await this.page.waitForTimeout(800);
     }
     return {
-      ok: saved, file: name, saved, ms: Date.now() - t0,
+      ok: saved, file: name, saved, overwritten: overwrote, renamedTo, ms: Date.now() - t0,
+      bytes: src.bytes, source: src.source,
+      error: renamedTo
+        ? 'the editor renamed the upload because the name already exists — it landed at ' + renamedTo + '; retry with overwrite:true to replace the original'
+        : undefined,
       hint: saved
         ? 'saved to the editor src store; visitors see it once the generator owner saves'
-        : 'file was injected but the panel never reported "saved" — check perch_errors and retry',
+        : (renamedTo ? undefined : 'file was injected but the panel never reported "saved" — check perch_errors and retry'),
     };
   }
 

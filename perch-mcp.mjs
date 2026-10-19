@@ -351,15 +351,31 @@ const TOOLS = [
   },
   {
     name: "perch_upload_src",
-    description: "Upload a file into the generator's src/ via the editor's file panel (DataTransfer injection — no OS dialog needed). The file lands in the editor src store ('saved'); it goes public when the generator's owner saves.",
+    description: "Upload a file into the generator's src/ via the editor's file panel. Source the bytes WITHOUT passing them through the conversation: prefer filePath (absolute local path, read server-side, byte-exact) or url (https, fetched server-side); inline content still works for small text. name may carry a virtual folder path (emoji/icon.svg) — the src store is flat string keys and the tree groups '/' keys into folders. overwrite:true deletes an existing file at that path first (the editor otherwise renames colliding uploads to name-2.ext instead of replacing). Lands in the editor src store ('saved'); goes public when the generator's owner saves.",
     inputSchema: {
       type: "object",
       properties: {
-        name: { type: "string", description: "Bare file name, e.g. README.md (no folders)" },
-        content: { type: "string", description: "Full file content" },
+        name: { type: "string", description: "File name or path, e.g. README.md or emoji/icon.svg (folders are virtual)" },
+        content: { type: "string", description: "Inline file content — small text only; it transits the model's context (transcription risk on big/dense files). Prefer filePath or url." },
+        filePath: { type: "string", description: "ABSOLUTE local path read server-side, e.g. C:/Users/you/Workspace/app/src/emoji/x.svg — byte-exact, nothing transits the conversation" },
+        url: { type: "string", description: "https URL fetched server-side (e.g. a raw.githubusercontent.com file) — nothing transits the conversation" },
+        binary: { type: "boolean", description: "Force binary (base64 → real bytes page-side) or text handling. Default: inferred from the extension" },
         timeout: { type: "integer", description: "ms to wait for the panel's 'saved' marker. Default 25000" },
+        overwrite: { type: "boolean", description: "Delete an existing file at this path first, so the upload replaces it instead of being renamed. Default false" },
       },
-      required: ["name", "content"],
+      required: ["name"],
+    },
+  },
+  {
+    name: "perch_delete_src",
+    description: "Delete a file from the generator's src/ via the editor's file tree (⋯ → 🗑️ delete → confirm). Staged in the editor store; the deletion goes public when the generator's owner saves. Pass the path the file lives under, e.g. AGENTS.md or emoji/old.svg.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "src path, e.g. AGENTS.md or emoji/old.svg" },
+        timeout: { type: "integer", description: "ms to wait for the row to disappear. Default 20000" },
+      },
+      required: ["path"],
     },
   },
 ];
@@ -393,11 +409,12 @@ const DISPATCH = {
   perch_stop: () => session.stop(),
   perch_navigate: (a) => session.navigate(a),
   perch_upload_src: (a) => session.uploadSrc(a),
+  perch_delete_src: (a) => session.deleteSrc(a),
 };
 
 // ----------------------------- server factory (MCP v2) -----------------------------
 function createServer() {
-  const server = new McpServer({ name: "perch", version: "2.0.0" }, { capabilities: { tools: {} } });
+  const server = new McpServer({ name: "perch", version: "2.1.0" }, { capabilities: { tools: {} } });
   for (const tool of TOOLS) {
     server.registerTool(
       tool.name,

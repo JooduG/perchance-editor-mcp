@@ -1,6 +1,6 @@
 {
   "name": "perch-mcp-v2",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "MCP v2 (2026-07-28 stateless) server: read/write control of a Perchance.org generator's live editor.",
   "type": "commonjs",
   "main": "perch-mcp.mjs",

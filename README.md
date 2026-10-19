@@ -2,7 +2,7 @@
 
 An MCP server that gives an AI agent real, bidirectional control of a
 [Perchance.org](https://perchance.org) generator: read its source, edit it,
-drive its live UI, and read its console — all through 27 tools over stdio,
+drive its live UI, and read its console — all through 28 tools over stdio,
 speaking the current MCP specification (`2026-07-28`, the stateless "v2"
 protocol).
 
@@ -11,7 +11,7 @@ Two distinct code paths, deliberately:
 | Path | Tools | Cost | Cloudflare |
 |---|---|---|---|
 | **Browser-free** | `perch_pull`, `perch_fetch_generator`, `perch_src`, `perch_list_src` | ~1s | none — uses `curl` |
-| **Live editor** | `perch_start` + the other 23 | ~2.7s start, then 1–20ms/call | mitigated |
+| **Live editor** | `perch_start` + the other 24 | ~2.7s start, then 1–20ms/call | mitigated |
 
 Reads should almost always use the browser-free path. The browser exists for
 edits, `eval`, and UI testing.
@@ -87,7 +87,7 @@ hermes mcp add perch \
   --args "/absolute/path/to/perchance-editor-mcp/perch-mcp.mjs"
 ```
 
-Answer `y` to *"Enable all 27 tools?"*, then start a new session or run
+Answer `y` to *"Enable all 28 tools?"*, then start a new session or run
 `/reload-mcp` in an open one. Confirm with `hermes mcp test perch`. The tools
 arrive namespaced as `mcp__perch__perch_pull`, `mcp__perch__perch_start`, …
 
@@ -170,13 +170,13 @@ Full recipe, collab/publish semantics, and the Cloudflare ladder:
 
 ## The tool set
 
-27 tools. All return JSON with an `ok` boolean and an `ms` timing field.
+28 tools. All return JSON with an `ok` boolean and an `ms` timing field.
 
 | Group | Tools |
 | --- | --- |
 | **Browser-free** (no session) | `perch_pull`, `perch_fetch_generator`, `perch_src`, `perch_list_src` |
 | **Session** | `perch_start`, `perch_status`, `perch_stop` |
-| **Recovery / src upload** | `perch_navigate`, `perch_upload_src` |
+| **Recovery / src files** | `perch_navigate`, `perch_upload_src`, `perch_delete_src` |
 | **Reading** (live) | `perch_read`, `perch_grep`, `perch_outline`, `perch_console`, `perch_errors`, `perch_snapshot` |
 | **Writing** (live) | `perch_patch`, `perch_edit`, `perch_write`, `perch_copy_lines` |
 | **Preview / UI** | `perch_refresh`, `perch_eval`, `perch_wait`, `perch_click`, `perch_type`, `perch_press`, `perch_set_viewport`, `perch_shot` |
@@ -236,7 +236,7 @@ and is gitignored.
 ```
 perchance-editor-mcp/
 ├── perch-mcp.mjs        MCP server: tool schemas + DISPATCH map + v2 stdio transport
-├── perch-core.js        PerchSession: browser control, CF ladder, API pulls, all 27 impls
+├── perch-core.js        PerchSession: browser control, CF ladder, API pulls, all 28 impls
 ├── SKILL.md             agent operating manual: tools, recipe, pitfalls, CF playbook
 ├── package.json         deps: @modelcontextprotocol/server + node (2026-07-28), patchright (default engine), playwright (fallback)
 ├── LICENSE              MIT

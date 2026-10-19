@@ -33,7 +33,7 @@ The bare names below (`perch_start`) are the server's own tool names.
 | Path | Tools | Cost | Cloudflare |
 |---|---|---|---|
 | **Browser-free** | `perch_pull`, `perch_fetch_generator`, `perch_src`, `perch_list_src` | ~1–3s | none — it shells out to `curl` |
-| **Live editor** | `perch_start` + the other 23 | ~2.7s start, then 1–20ms/call | mitigated, see Cloudflare |
+| **Live editor** | `perch_start` + the other 24 | ~2.7s start, then 1–20ms/call | mitigated, see Cloudflare |
 
 **Default to browser-free for reads.** A 40,000-line generator is ~2.5MB;
 `perch_grep` stringifies that whole document inside the browser on every call,
@@ -99,7 +99,7 @@ Hermes speaks both eras — `LATEST_HANDSHAKE_VERSION = 2025-11-25`,
 5. `serveStdio(factory, opts)` returns a `StdioServerHandle` **synchronously** — it is NOT a Promise. Do not `.catch()` it; route errors through the `onerror` option.
 6. `legacy: "reject"` makes the server modern-only (2026-07-28); omit it (default `'serve'`) to keep serving v1 clients too.
 
-## Tool set (27)
+## Tool set (28)
 
 ### Browser-free — no session, no collab key
 
@@ -143,12 +143,13 @@ chromium. Notes:
   change needs an MCP server restart (`/reload-mcp` or a new session) to become
   the no-arg default.
 
-### Recovery & src upload
+### Recovery & src files
 
 | Tool | Purpose |
 |---|---|
 | `perch_navigate` | Navigate the whole editor **page** (top-level) to any `https://` URL, waiting out a CF interstitial. Recovery tool. |
-| `perch_upload_src` | Upload `{name, content}` into the generator's `src/` through the editor's file panel (bare file names, no folders). |
+| `perch_upload_src` | Upload into the generator's `src/` through the editor's file panel. `name` may carry a virtual folder path (`emoji/icon.svg`) — the store is flat `/`-keys. Source the bytes one of three ways: `content` (small inline text only — it transits the model's context), `filePath` (absolute local path, read server-side, byte-exact) or `url` (fetched server-side); `binary` overrides text/binary inference. `overwrite:true` deletes an existing file at that path first — the editor otherwise RENAMES colliding uploads to `name-2.ext` instead of replacing. |
+| `perch_delete_src` | Delete `{path}` from the generator's `src/` via the file tree (⋯ → 🗑️ delete → confirm). Staged; goes public when the owner saves. |
 
 ### Reading (live)
 
