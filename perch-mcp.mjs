@@ -44,7 +44,7 @@ const TOOLS = [
         name: { type: "string", description: "Generator name, e.g. 'minimal'" },
         collabKey: { type: "string", description: "Collab key from the editor URL hash (#edit:collab=KEY)" },
         headed: { type: "boolean", description: "Show a visible browser window. Default false" },
-        engine: { type: "string", enum: ["chromium", "patchright"], description: "Browser engine. 'patchright' = undetected playwright fork (stealth driver, DEFAULT; falls back to playwright when the optional module is absent). 'chromium' = plain playwright escape hatch" },
+        engine: { type: "string", enum: ["firefox", "chromium"], description: "Browser engine. 'firefox' = plain playwright firefox (DEFAULT; clears Cloudflare on perchance.org subdomains where chromium is flagged; falls back to chromium when the firefox binary is absent). 'chromium' = plain playwright chromium escape hatch" },
         width: { type: "integer", description: "Viewport width. Default 1500" },
         height: { type: "integer", description: "Viewport height. Default 950" },
         force: { type: "boolean", description: "Reload even if already on this generator" },
@@ -414,7 +414,7 @@ const DISPATCH = {
 
 // ----------------------------- server factory (MCP v2) -----------------------------
 function createServer() {
-  const server = new McpServer({ name: "perch", version: "2.2.0" }, { capabilities: { tools: {} } });
+  const server = new McpServer({ name: "perch", version: "2.3.0" }, { capabilities: { tools: {} } });
   for (const tool of TOOLS) {
     server.registerTool(
       tool.name,

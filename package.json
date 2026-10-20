@@ -1,7 +1,7 @@
 {
   "name": "perch-mcp-v2",
-  "version": "2.2.0",
-  "description": "MCP v2 (2026-07-28 stateless) server: read/write control of a Perchance.org generator's live editor.",
+  "version": "2.3.0",
+  "description": "MCP v2 (2026-07-28 stateless) server: read/write control of a Perchance.org generator's live editor. Default engine: Camoufox (anti-detection Firefox).",
   "type": "commonjs",
   "main": "perch-mcp.mjs",
   "license": "MIT",
@@ -17,9 +17,8 @@
     "test:mcp": "node test/smoke-mcp.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/server": "^2.3.1",
     "@modelcontextprotocol/node": "^2.1.1",
-    "patchright": "^1.64.0",
+    "@modelcontextprotocol/server": "^2.3.1",
     "playwright": "^1.64.0"
   }
 }

@@ -1,7 +1,7 @@
 ---
 name: perchance-editor
 description: "Use when reading, editing, or live-testing a Perchance.org generator through the perch MCP server."
-version: 2.2.0
+version: 2.3.0
 author: Nightomaru
 license: MIT
 platforms: [linux, macos, windows]
@@ -24,9 +24,9 @@ Load this whenever a task touches a Perchance.org generator: read/patch its
 source, drive its live preview, inspect its console, upload `src/` files, or
 answer "does this generator still work?".
 
-Tools arrive namespaced by the client. In Hermes they appear as
-`mcp__perch__perch_start`, `mcp__perch__perch_pull`, … (server name `perch`).
-The bare names below (`perch_start`) are the server's own tool names.
+Tools arrive namespaced by the client (most clients prefix them with the
+server name, e.g. `mcp__perch__perch_start`). The bare names below
+(`perch_start`) are the server's own tool names.
 
 ## Two paths — pick deliberately
 
@@ -78,10 +78,14 @@ legacy-handshake client's `initialize` is answered with
 `@modelcontextprotocol/sdk` 1.32.1, protocol `2025-11-25`) is preserved at git
 tag `v1.1.0`.
 
-Hermes speaks both eras — `protocol: auto` (default) tries the legacy handshake
-first, then falls back to `server/discover` on `-32022` / method-not-found — so
-this server needs **no config change**. `protocol: legacy` is handshake-only
-and will NOT connect to this server.
+Modern MCP clients (protocol `2025-11-25` handshake or the `2026-07-28`
+discover-based flow) connect directly. This server is **modern-only**: a
+legacy-handshake-only client's `initialize` is answered with
+`-32022 UnsupportedProtocolVersion` — such clients should use git tag
+`v1.1.0` (the last legacy-handshake server, SDK
+`@modelcontextprotocol/sdk` 1.32.1, protocol `2025-11-25`). Clients with an
+`auto`/fallback strategy (try the legacy handshake, fall back to
+`server/discover` on `-32022`) need **no config change**.
 
 ## Tool set (28)
 
@@ -103,31 +107,35 @@ and will NOT connect to this server.
 | `perch_stop` | Close the browser (20-minute idle timer does this too). |
 
 `perch_start` args: `name` (required), `collabKey` (from `#edit:collab=KEY`),
-`headed` (default false), `engine` (`chromium` | `patchright`), `width`/`height`
+`headed` (default false), `engine` (`firefox` | `chromium`), `width`/`height`
 (default 1500×950), `force` (reload even if already on this generator).
 Results and `perch_status` also carry `effectiveEngine` — what is actually
-running (`patchright`, `patchright + chrome channel`, `playwright`, or
-`playwright (patchright module unavailable)` when the optional dependency is
-missing and the session silently runs the default engine). An explicit `engine`
-that differs from the running browser forces a relaunch, so the request always
-takes effect.
+running (`firefox`, or `chromium (firefox binary unavailable)` when the
+firefox binary is missing). An explicit `engine` that differs from the
+running browser forces a relaunch, so the request always takes effect.
 
-**Engine default: `patchright`** (stealth driver) since 2026-10-17 — the owner
-flipped it in `perch-core.js` `start()` after repeated CF stalls on the default
-chromium. Notes:
-- patchright runs its bundled chromium when the `chrome` channel is absent (a
-  machine without system Chrome reports `effectiveEngine: "patchright"`, not
-  `"patchright + chrome channel"`) — probe first with
-  `node -e "require('patchright').chromium.launch({channel:'chrome'})...` from the
-  server dir if launches fail.
-- It hardens the fingerprint for CF challenges (page + collab WS handshakes), but
-  it canNOT fix `ERR_BLOCKED_BY_RESPONSE` / X-Frame-Options embed blocks — those
-  are perchance's own frame headers, not challenges.
-- The skill's own caveat stands: on some networks patchright measures *worse*;
-  pass `engine: "chromium"` per-call to A/B it.
+**Prefer `headed: true` for interactive agent sessions.** A visible window
+clears CF at least as well as headless (verified equal), lets the user watch
+what the agent is doing in real time, and Turnstile-style embedded widgets
+behave more predictably. Caveat: do not minimize/occlude the window —
+backgrounded pages throttle timers and can stall long flows. Headless stays
+the default for CI-style runs.
+
+**Engine default: `firefox`** (plain playwright firefox) since v2.3.0.
+- WHY firefox: chromium-based engines (plain chromium AND stealth forks) are
+  Cloudflare-flagged on perchance.org SUBDOMAINS — `text-generation.perchance.org`
+  and `upload.perchance.org` embeds sit on "Just a moment..." forever — while
+  plain firefox clears those challenges headless out of the box AND initializes
+  the perchance editor fine. Camoufox was tried and DROPPED: its C++ fingerprint
+  spoofing breaks the perchance editor init (the CodeMirror globals never
+  materialize on the editor page), while plain firefox clears the same
+  challenges with no anti-detection layer.
+- patchright was REMOVED in v2.3.0 — it never fixed the subdomain embed blocks.
+- Install: `npx playwright install firefox` (~90MB). Without the binary the
+  session falls back to chromium and reports `effectiveEngine:
+  "chromium (firefox binary unavailable)"` — loud in the server stderr.
 - The running MCP server reads `engine` per-call, but a `perch-core.js` default
-  change needs an MCP server restart (`/reload-mcp` or a new session) to become
-  the no-arg default.
+  change needs an MCP server restart to become the no-arg default.
 
 ### Recovery & src files
 
@@ -291,17 +299,11 @@ clear, and reports `recoveryStep` plus a per-step `attempts` log.
   perch_navigate {url: "https://text-generation.perchance.org/embed"}   # let the challenge render & clear
   perch_start    {name, collabKey, force: true}                         # back to the editor, cookies now cleared
   ```
-- If Cloudflare hard-blocks, the default `patchright` engine usually clears it
-  via its ladder; escalate with `headed: true` if not. A per-call
-  `engine: "chromium"` A/B is worth one try — on some networks patchright
-  measures *worse* than plain chromium.
-- The `patchright` engine runs the patchright-recommended config (no custom
-  UA, no JS fingerprint injection; it tries the real Chrome channel first and
-  falls back to the bundled chromium build). Both engines share the same
-  tool surface: every evaluate reaches the page's MAIN world, and console /
-  pageerror diagnostics work under patchright via an in-page hook, so
-  `perch_status`, `perch_read`, `perch_grep`, `perch_eval`, and `perch_errors`
-  behave identically on either engine.
+- If Cloudflare hard-blocks the editor page, the default firefox engine clears
+  it via its ladder (and perchance subdomains clear without any ladder);
+  escalate with `headed: true` if needed. Do NOT switch to `engine: "chromium"`
+  for CF reasons — chromium is the flagged family on perchance subdomains; it
+  exists only as a debugging escape hatch.
 
 ## Pitfalls that will bite you
 
@@ -365,9 +367,9 @@ clear, and reports `recoveryStep` plus a per-step `attempts` log.
     is a silent visual bug. Delete is staged like upload: the row vanishes at once, visitors
     see it when the owner saves.
 15. **Deploy accumulated local rounds as FINAL-STATE hunks against the live doc's actual state.** When the working copy has run ahead over several edit rounds and the room still holds an older state (owner save pending, or an earlier deploy was interrupted), do not replay the round-by-round diffs: grep the live pane for each round's anchors, then compose each `perch_patch` old/new pair to transform the LIVE text straight to the final state. Replaying intermediate hunks either fails to match or double-applies, and partial application stays invisible until the line-count parity check flags it.
-16. **Binary uploads are CORRUPTED when the upload embed is Cloudflare-blocked.** The panel's normal upload path pushes bytes through the `upload.perchance.org/embed` iframe; when CF blocks that embed (`ERR_BLOCKED_BY_RESPONSE` / `X-Frame-Options` in the console — also logged by the panel as `src background pre-upload failed for <name>: upload embed unavailable`), the panel falls back to storing the file through the room sync as UTF-8 TEXT. Text files round-trip losslessly; binary files get mojibake'd (measured: a 93,732-byte onnx landed as 165,640 bytes; the stored sha256 equals the sha256 of the source's UTF-8-decode-re-encode). The tree still SHOWS the file, and `perch_upload_src` reports the truth: `ok:false, landed:true, integrity:'utf8-mangled', storeHash:<mangled>`. Fix: clear the block top-level (`perch_navigate https://upload.perchance.org/embed`, wait out the challenge, `perch_start {force:true}`) and re-upload; until the embed clears, only text uploads are safe. Don't burn time on embed-recovery BEFORE checking the store — the upload may have landed anyway.
+16. **Binary uploads via the panel cannot land intact — the intact path is human-gated.** The panel's normal upload path pushes bytes through the `upload.perchance.org/embed` iframe and requires a Cloudflare Turnstile token from a widget inside that hidden iframe. Under automation the widget errors (`turnstile error: 600010` → "turnstile token never arrived") and the panel logs `src background pre-upload failed for <name>: ... [E-ANTIBOT]`, falling back to storing the file through the room sync as UTF-8 TEXT: text files round-trip losslessly, binary files get mojibake'd (measured: a 93,732-byte onnx stored as 165,640 bytes; the stored sha256 equals the sha256 of the source's UTF-8-decode-re-encode) and may then be discarded outright by the panel after the failed pre-upload. `perch_upload_src` reports the truth — compare `storeSize`/`storeHash` with `bytes`/`sha256` (`integrity:'utf8-mangled'` or an unmatched size). Loading the embed top-level clears the PAGE challenge but does NOT satisfy the hidden widget's token flow. Practical rule: text and small assets (SVG/JSON/MD) upload fine; for true binary assets, ask the owner to add them or use a URL the generator can fetch at runtime.
 17. **Verifying staged `src/` state (pre-save) — `perch_list_src` is blind to it.** The CDN manifest (and `perch_list_src`) reflects only the last OWNER save. For what the ROOM actually holds, eval the editor frame: `perch_eval {frame:"editor", js:"JSON.stringify(window.srcState?._internals?.working ?? null)"}` → `{path: {pending, size, rev, writeTime}}`; the sha256 registry lives in the Yjs doc: `perch_eval {frame:"editor", js:"(()=>{const m=window.yjsProvider?.doc?.share?.get('___pendingSrc___');const o={};m&&m.forEach((v,k)=>o[k]=v);return JSON.stringify(o)})()"}` → `{path: {hash, size, rev, tabId, deleted?, committed?}}`. Tombstones (`deleted:true`) mark staged deletions, and the tree keeps rendering a folder until the owner saves even when every file under it is tombstoned.
-18. **Perchance-AI replies can hang forever when CF challenges a subdomain.** The ai-text plugin runs in an iframe (`#aiTextPluginEmbedIframe` → `text-generation.perchance.org/embed`). When Cloudflare challenges that subdomain, the request is composed (`getBotReply` logged) but never answers and never errors — the UI stays on `Generating...` indefinitely. Verified unfixable agent-side on a flagged IP: the top-level challenge (`perch_navigate` to the embed URL) did not clear under patchright OR plain chromium (90s ×3, fresh contexts), so the iframe can never establish. If a task needs AI replies, say so plainly and hand off to the user's own browser; everything else (UI driving, editing, text src uploads) works. Same root cause as pitfall 16's upload embed.
+18. **Perchance-AI replies need the firefox engine on a CF-flagged IP.** The ai-text plugin runs in an iframe (`#aiTextPluginEmbedIframe` → `text-generation.perchance.org/embed`). On chromium engines that subdomain sits behind a CF challenge and the request hangs forever — composed (`getBotReply` logged) but never answered, the UI stuck on `Generating...` with no error. Since v2.3.0 the default firefox engine clears that subdomain challenge and AI replies stream and complete end-to-end (verified: a character-chat generator replied in ~10s and the full log was readable from `#messageFeed`). If replies still hang, check the engine via `perch_status` (`effectiveEngine` must be `firefox`) — a chromium fallback means the firefox binary is missing (`npx playwright install firefox`).
 
 ## UI testing without screenshots
 
@@ -394,8 +396,8 @@ Reach for `perch_shot` only when a human needs to see it.
   never `/c/…` or `/tmp/…`.
 - `curl.exe` ships with Windows 10+ and is what the browser-free path uses.
 - Give the server a generous timeout — a full CF ladder can outlast short
-  ceilings (`hermes mcp add perch --command "C:/Program Files/nodejs/node.exe"`
-  --connect-timeout 120 --args "<repo>/perch-mcp.mjs"`).
+  ceilings (e.g. a `timeout: 180` / `connect_timeout: 120` style entry in your
+  client's MCP config).
 
 ## Security
 

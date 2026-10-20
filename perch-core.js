@@ -17,13 +17,10 @@
 //   * Diagnostics: console + pageerror buffers captured from every frame.
 //   * UI testing by text: `snapshot()` lists interactive elements in the live
 //     preview so an agent can drive the UI without screenshots.
-//   * engine option: 'chromium' (playwright) | 'patchright' (stealth driver).
-//     patchright runs with ITS OWN recommended config (no custom UA, no JS
-//     fingerprint injection, no extra flags) and needs two adaptations:
-//     - every evaluate that must see page-set globals passes
-//       isolatedContext:false (patchright defaults to an isolated world);
-//     - console/pageerror events never fire under patchright (Console API is
-//       disabled there), so diagnostics come from an in-page hook instead.
+//   * engine option: 'firefox' (DEFAULT — plain playwright firefox; clears
+//     Cloudflare on perchance.org subdomains where chromium engines are
+//     flagged) | 'chromium' (plain playwright chromium escape hatch, also the
+//     automatic fallback when the firefox binary is unavailable).
 //
 // NOTE ON eval(): the `evaluate(...)` calls below are a browser JS-expression
 // evaluator — that IS the feature (perch_eval / perch_type drive the live
@@ -64,16 +61,10 @@ const STEALTH_INIT = () => {
   } catch (e) {}
 };
 
-// patchright evaluates in an ISOLATED world by default (that is how it avoids
-// Runtime.enable), where page-set globals are invisible. Its extended
-// signature takes isolatedContext as the 4th parameter; plain playwright has
-// exactly (fn, arg) and rejects extra args, so the call shape depends on the
-// loaded driver (EVAL_EXTENDED, set by loadChromium). Use evalMain for EVERY
-// evaluate that touches page globals or must behave like page-side JS.
+// Standard playwright evaluate shape. Every evaluate that touches page globals
+// goes through evalMain so the call shape has exactly one definition point.
 function evalMain(target, fn, arg) {
-  return EVAL_EXTENDED
-    ? target.evaluate(fn, arg, undefined, false)
-    : target.evaluate(fn, arg);
+  return target.evaluate(fn, arg);
 }
 
 // Default UA template per host OS (no fingerprint injection — this only
@@ -87,74 +78,12 @@ function platformUaPrefix() {
   }
 }
 
-// In-page diagnostics hook, installed via addInitScript (main world) ONLY
-// under patchright, where the driver-level Console API is disabled and
-// page.on('console')/page.on('pageerror') never fire. Buffers console output
-// and uncaught errors per frame; the Node side drains the buffers on a timer
-// (see _drainPageDiag). Must stay self-contained and never throw.
-const DIAG_HOOK = () => {
-  try {
-    if (window.__perchDiagInstalled) return;
-    Object.defineProperty(window, '__perchDiagInstalled', { value: true });
-    const buf = [];
-    const MAX = 250;
-    const push = (type, text) => {
-      try {
-        buf.push({ type, text: String(text).slice(0, 500) });
-        if (buf.length > MAX) buf.splice(0, buf.length - MAX);
-      } catch (e) {}
-    };
-    const fmt = (args) => {
-      try {
-        return Array.prototype.map.call(args, a => {
-          if (a instanceof Error) return (a.stack || a.message || String(a));
-          if (typeof a === 'object' && a !== null) { try { return JSON.stringify(a); } catch (e) { return String(a); } }
-          return String(a);
-        }).join(' ');
-      } catch (e) { return ''; }
-    };
-    ['log', 'info', 'warn', 'error'].forEach(level => {
-      const orig = console[level] ? console[level].bind(console) : null;
-      console[level] = function () {
-        try { push(level === 'warn' ? 'warning' : level, fmt(arguments)); } catch (e) {}
-        if (orig) orig.apply(null, arguments);
-      };
-    });
-    window.addEventListener('error', e => { push('pageerror', (e && e.message) || String(e)); });
-    window.addEventListener('unhandledrejection', e => {
-      const r = e && e.reason;
-      push('unhandledrejection', (r && (r.stack || r.message)) ? String(r.stack || r.message) : String(r));
-    });
-    window.__perchDiagDrain = () => { try { return buf.splice(0, buf.length); } catch (e) { return []; } };
-  } catch (e) {}
-};
-
 const _engineCache = {};
-// Whether the ACTIVE driver understands patchright's extended evaluate
-// signature (4th param isolatedContext). Plain playwright's evaluate accepts
-// exactly (fn, arg) and hard-rejects extra args, so every evaluate must go
-// through evalMain, which picks the right call shape. Set by loadChromium on
-// every launch — the active driver is always the one the page was created
-// with (single PerchSession per server process, launched before any eval).
-let EVAL_EXTENDED = false;
-function loadChromium(engine) {
-  const key = engine === 'patchright' ? 'patchright' : 'playwright';
-  if (_engineCache[key]) { EVAL_EXTENDED = _engineCache[key].extended; return _engineCache[key]; }
-  let mod, fallback = false;
-  if (key === 'patchright') {
-    try { mod = require('patchright'); } catch { mod = require('playwright'); fallback = true; }
-  } else {
-    mod = require('playwright');
-  }
-  if (fallback) {
-    // Loud, not silent: a missing optional dependency must never leave the
-    // session reporting an engine it is not actually running.
-    try { console.error('perch-mcp: patchright is not installed — running plain playwright for engine "patchright".'); } catch (e) {}
-  }
-  const extended = key === 'patchright' && !fallback;
-  EVAL_EXTENDED = extended;
-  _engineCache[key] = { chromium: mod.chromium, fallback, extended };
-  return _engineCache[key];
+function loadChromium() {
+  if (_engineCache.playwright) return _engineCache.playwright;
+  const mod = require('playwright');
+  _engineCache.playwright = { chromium: mod.chromium, firefox: mod.firefox };
+  return _engineCache.playwright;
 }
 
 function buildEditorUrl(name, collabKey) {
@@ -192,13 +121,12 @@ class PerchSession {
     this.generator = null;
     this.collabKey = null;
     this.headed = null;      // true = visible window
-    this.engine = 'patchright';
-    this.effectiveEngine = null; // what is actually running (channel / fallback)
-    this._usingPatchright = false;
+    this.engine = 'firefox';
+    this.effectiveEngine = null; // what is actually running (engine / fallback)
+    this._runningEngine = null;  // 'firefox' | 'chromium' — set by _launch
     this.ready = false;
     this.last = Date.now();
     this._idle = null;
-    this._diagDrain = null;
     this.diag = { console: [], errors: [], droppedConsole: 0, droppedErrors: 0 };
   }
 
@@ -241,45 +169,9 @@ class PerchSession {
         push(this.diag.console, 'droppedConsole', `[net-fail] ${url.slice(0, 120)} — ${f ? f.errorText : 'unknown'}`);
       });
     } catch (e) {}
-    // Under patchright the two listeners above never fire (Console API is
-    // disabled driver-side) — the in-page hook + timer below is the source.
-    this._startDiagDrain();
-  }
-
-  _startDiagDrain() {
-    this._stopDiagDrain();
-    if (this.engine !== 'patchright' || !EVAL_EXTENDED) return;
-    this._diagDrain = setInterval(() => { this._drainPageDiag().catch(() => {}); }, 700);
-    this._diagDrain.unref();
-  }
-
-  _stopDiagDrain() {
-    if (this._diagDrain) { clearInterval(this._diagDrain); this._diagDrain = null; }
-  }
-
-  // Pull buffered console/pageerror entries out of every frame's in-page hook
-  // buffer (patchright only; the hook is not installed on other engines).
-  async _drainPageDiag() {
-    if (!EVAL_EXTENDED || !this.page) return;
-    for (const f of this.page.frames()) {
-      let entries = null;
-      try {
-        entries = await f.evaluate(() => (window.__perchDiagDrain ? window.__perchDiagDrain() : []), undefined, undefined, false);
-      } catch { continue; }
-      if (!entries || !entries.length) continue;
-      for (const en of entries) {
-        if (!en || !en.type) continue;
-        if (en.type === 'pageerror' || en.type === 'unhandledrejection') {
-          this._pushDiag(this.diag.errors, 'droppedErrors', `[${en.type}] ${en.text}`);
-        } else {
-          this._pushDiag(this.diag.console, 'droppedConsole', `[${en.type}] ${en.text}`);
-        }
-      }
-    }
   }
 
   async errors({ clear = false } = {}) {
-    await this._drainPageDiag().catch(() => {});
     const syntax = this.page
       ? await evalMain(this.page, () => {
           try { return window.getEditorSyntaxErrors ? window.getEditorSyntaxErrors() : null; } catch (e) { return 'err:' + e.message; }
@@ -354,19 +246,11 @@ class PerchSession {
 
   async _newContext(width, height) {
     const opts = { viewport: { width, height } };
-    if (this._usingPatchright) {
-      // Patchright best practice: no custom UA/headers, no locale/timezone or
-      // JS fingerprint injection — the driver's own patches are the stealth.
-      // ONE exception: in headless the default UA advertises "Headless" —
-      // override it with the real version string of the running binary so UA
-      // and client-hint headers never contradict each other.
-      if (this.browser && this.headed === false) {
-        const real = String(this.browser.version() || '');
-        if (real) opts.userAgent = platformUaPrefix() + ' Chrome/' + real + ' Safari/537.36';
-      }
-      const ctx = await this.browser.newContext(opts);
-      await ctx.addInitScript(DIAG_HOOK);
-      return ctx;
+    if (this._runningEngine === 'firefox') {
+      // Firefox: bare context. Firefox headless UA carries no "Headless"
+      // marker and the native fingerprint is what cleared the CF challenges,
+      // so no UA/locale/JS-injection overrides.
+      return this.browser.newContext(opts);
     }
     if (this.browser && this.headed === false) {
       // Headless default UA contains the "Headless" marker; replace it with
@@ -384,28 +268,31 @@ class PerchSession {
   }
 
   async _launch(headed, width, height) {
-    const loaded = loadChromium(this.engine);
-    const chromium = loaded.chromium;
-    const usePatchright = this.engine === 'patchright' && !loaded.fallback;
-    this._usingPatchright = usePatchright;
     let browser;
-    if (loaded.fallback) {
-      this.effectiveEngine = 'playwright (patchright module unavailable)';
-      browser = await chromium.launch({ headless: !headed, args: STEALTH_ARGS });
-    } else if (usePatchright) {
-      // Prefer the real Chrome channel when present (patchright README best
-      // practice); fall back to the bundled chromium build otherwise.
-      this.effectiveEngine = 'patchright';
-      try {
-        browser = await chromium.launch({ headless: !headed, channel: 'chrome' });
-        this.effectiveEngine = 'patchright + chrome channel';
-      } catch (e) {
-        browser = await chromium.launch({ headless: !headed });
+    if (this.engine === 'firefox') {
+      // Firefox: plain playwright firefox. Chromium-based engines (chromium and
+      // stealth forks) are Cloudflare-flagged on perchance.org SUBDOMAINS
+      // (text-generation / upload embeds sit on "Just a moment..." forever),
+      // while firefox clears those challenges headless out of the box AND
+      // initializes the perchance editor fine. Camoufox was tried and DROPPED:
+      // its fingerprint spoofing breaks the perchance editor init (the
+      // CodeMirror globals never materialize), while plain firefox clears the
+      // same challenges without any anti-detection layer.
+      let loaded = loadChromium();
+      if (!loaded.firefox) {
+        try { console.error('perch-mcp: playwright firefox binary missing — run `npx playwright install firefox`; falling back to chromium.'); } catch (e) {}
+        this.effectiveEngine = 'chromium (firefox binary unavailable)';
+        browser = await loaded.chromium.launch({ headless: !headed, args: STEALTH_ARGS });
+      } else {
+        this.effectiveEngine = 'firefox';
+        browser = await loaded.firefox.launch({ headless: !headed });
       }
     } else {
       this.effectiveEngine = 'playwright';
-      browser = await chromium.launch({ headless: !headed, args: STEALTH_ARGS });
+      const loaded = loadChromium();
+      browser = await loaded.chromium.launch({ headless: !headed, args: STEALTH_ARGS });
     }
+    this._runningEngine = this.effectiveEngine === 'firefox' ? 'firefox' : 'chromium';
     this.browser = browser;
     this.ctx = await this._newContext(width, height);
     this._ensureIdle();
@@ -418,9 +305,12 @@ class PerchSession {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
     let cfWaitedMs = 0;
     if (await isCfBlocked(page)) {
+      // Camoufox + Turnstile can take 60-90s of "Waiting for token..." loops
+      // before the challenge clears — 25s aborted a solve that was about to
+      // succeed and sent the ladder into an endless relaunch cycle.
       const cfStart = Date.now();
       while (await isCfBlocked(page)) {
-        if (Date.now() - cfStart > 25000) break;
+        if (Date.now() - cfStart > 90000) break;
         await page.waitForTimeout(2000);
       }
       cfWaitedMs = Date.now() - cfStart;
@@ -494,12 +384,12 @@ class PerchSession {
     this._touch();
     const t0 = Date.now();
     if (!name) throw new Error('missing generator name');
-    if (engine) this.engine = engine; else this.engine = 'patchright'; // default: stealth driver (falls back to playwright when the optional module is absent)
+    if (engine) this.engine = engine; else this.engine = 'firefox'; // default: playwright firefox (clears perchance-subdomain CF challenges where chromium is flagged; falls back to chromium when the firefox binary is absent)
     // An explicit engine that differs from the RUNNING browser must take
     // effect: the ladder's 'newctx' step only recreates the context and would
     // otherwise silently keep the old engine (observed: engine:"chromium"
     // answered effectiveEngine:"patchright"). Force a relaunch in that case.
-    if (engine && this.browser && ((this._usingPatchright && this.engine !== 'patchright') || (!this._usingPatchright && this.engine === 'patchright'))) {
+    if (engine && this.browser && this._runningEngine && this._runningEngine !== this.engine) {
       try { if (this.ctx) { await this.ctx.close(); } } catch {}
       try { await this.browser.close(); } catch {}
       this.ctx = null; this.browser = null; this.page = null; this.ready = false;
@@ -526,7 +416,7 @@ class PerchSession {
         effectiveEngine: this.effectiveEngine || this.engine,
         ms: Date.now() - t0, cfBlocked: true, attempts: r.attempts,
         error: 'Cloudflare challenge not cleared after ' + r.attempts.length + ' attempt(s).',
-        hint: 'CF flagging is intermittent — retry, or use engine:"patchright", or headed:true.',
+        hint: 'CF flagging is intermittent — retry, or headed:true. The default camoufox engine clears challenges chromium cannot.',
       };
     }
     const st = await this.status();
@@ -785,7 +675,6 @@ class PerchSession {
   async refresh() {
     if (!this.page) throw new Error('call perch_start first');
     this._touch();
-    await this._drainPageDiag().catch(() => {});
     const before = this.diag.console.length;
     {
       const fr = await this._frame('preview').catch(() => null);
@@ -809,7 +698,6 @@ class PerchSession {
     const syntaxErrors = await evalMain(this.page, () => {
       try { return window.getEditorSyntaxErrors ? window.getEditorSyntaxErrors() : null; } catch (e) { return null; }
     }).catch(() => null);
-    await this._drainPageDiag().catch(() => {});
     return {
       ok: true, previewLoaded: loaded, syntaxErrors,
       runtimeErrors: this.diag.errors.slice(-30),
@@ -821,7 +709,6 @@ class PerchSession {
   async console({ clear = false } = {}) {
     if (!this.page) throw new Error('call perch_start first');
     this._touch();
-    await this._drainPageDiag().catch(() => {});
     const out = {
       ok: true,
       panel: (await this._readConsole()).slice(-6000),
@@ -1211,15 +1098,15 @@ class PerchSession {
     }, { path });
     if (!menu.ok) return { existed: true, error: menu.error };
     await this.page.waitForTimeout(700);
-    // the menu is a document-level popup: childless div, exact "🗑️ delete"
-    const del = await evalMain(ed, () => {
-      const txt = String.fromCodePoint(0x1F5D1) + String.fromCodePoint(0xFE0F) + ' delete';
-      const item = [...document.querySelectorAll('div')].filter(el => el.offsetParent !== null && el.childElementCount === 0 && (el.textContent || '').trim() === txt).pop();
-      if (!item) return { ok: false, error: 'delete item not found (menu closed?)' };
-      item.click();
-      return { ok: true };
-    });
-    if (!del.ok) return { existed: true, error: del.error };
+    // the menu is a document-level popup: childless div, exact "🗑️ delete".
+    // Firefox needs a REAL pointer click on the item — the synthetic
+    // el.click() closes the menu without triggering its handler (observed:
+    // the confirm modal never appears), while playwright's click works.
+    try {
+      await ed.click('text=🗑️ delete', { timeout: 5000 });
+    } catch (e) {
+      return { existed: true, error: 'delete item not clickable (menu closed?)' };
+    }
     await this.page.waitForTimeout(700);
     // confirm modal inside the panel ("Delete src/…?"), ok is its last button
     const confirm = await evalMain(ed, () => {
@@ -1459,7 +1346,6 @@ class PerchSession {
   }
 
   async stop() {
-    this._stopDiagDrain();
     if (this._idle) { clearInterval(this._idle); this._idle = null; }
     if (this.ctx) { try { await this.ctx.close(); } catch {} this.ctx = null; }
     if (this.browser) { try { await this.browser.close(); } catch {} this.browser = null; }
