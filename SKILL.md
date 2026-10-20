@@ -27,7 +27,7 @@ preview is the `#outputIframeEl` subframe.
 ## Tool map
 
 | Group | Tools | Key quirks |
-|---|---|---|
+| --- | --- | --- |
 | Browser-free | `perch_pull`, `perch_fetch_generator`, `perch_src`, `perch_list_src` | `perch_list_src` reflects the last OWNER save only — blind to the collab room |
 | Session | `perch_start`, `perch_status`, `perch_stop` | `perch_start` self-escalates its CF ladder; `perch_status` is 2ms — call it liberally |
 | Recovery/src | `perch_navigate`, `perch_upload_src`, `perch_delete_src` | uploads: prefer `filePath`/`url` (byte-exact, server-side) over inline `content`; results carry `landed`/`integrity`/`sha256`/`storeHash`/`storeSize`/`embedBlocked`; deletes carry `storeConfirmed` |
