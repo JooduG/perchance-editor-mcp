@@ -126,9 +126,12 @@ if you want to skip the failed handshake attempt entirely.
 ```
 
 The client must support MCP `2026-07-28` (or a modern-era SDK that negotiates
-via `server/discover`). For a legacy-handshake-only client, use the
-[`v1.1.0`](https://github.com/Nightomaru/perchance-editor-mcp/releases/tag/v1.1.0)
-tag instead. The server itself has **no environment variables and no config
+via `server/discover`). For a legacy-handshake-only client, point it at
+`perch-mcp-legacy.mjs` instead — the same 28 tools and perch-core fixes behind
+the classic initialize/`tools/list`/`tools/call` flow (protocol `2025-11-25`
+and earlier; no `_meta` envelope required), shipped since tag
+[`v1.2.0`](https://github.com/Nightomaru/perchance-editor-mcp/releases/tag/v1.2.0).
+The server itself has **no environment variables and no config
 files**. Generator name and collab key are per-call arguments, so one server
 instance serves any number of generators. If your client supports per-call
 timeouts, give this server a generous one — a full Cloudflare ladder can
@@ -233,7 +236,9 @@ and is gitignored.
 
 ```
 perchance-editor-mcp/
-├── perch-mcp.mjs        MCP server: tool schemas + DISPATCH map + v2 stdio transport
+├── perch-mcp.mjs        MCP server (modern 2026-07-28 stdio entry)
+├── perch-mcp-legacy.mjs optional entry: legacy initialize/tools handshake, same tools
+├── perch-tools.mjs      shared tool schemas + DISPATCH table (both entries serve this)
 ├── perch-core.js        PerchSession: browser control, CF ladder, API pulls, all 28 impls
 ├── SKILL.md             agent operating manual: tools, recipe, pitfalls, CF playbook
 ├── package.json         deps: @modelcontextprotocol/server + node (2026-07-28), playwright (firefox default engine)
