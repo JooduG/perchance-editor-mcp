@@ -1,7 +1,7 @@
 ---
 name: perchance-editor
 description: "Use when reading, editing, or live-testing a Perchance.org generator through the perch MCP server."
-version: 2.1.0
+version: 2.2.0
 author: Nightomaru
 license: MIT
 platforms: [linux, macos, windows]
@@ -67,7 +67,7 @@ The live preview (the running generator) is the subframe **`#outputIframeEl`**,
 served from a per-user subdomain like `https://<32-hex>.perchance.org/<name>#edit`.
 
 
-## MCP protocol version (v2, modern-only)
+## MCP protocol compatibility (v2, modern-only)
 
 Since v2.0.0 the repo ships ONE server, speaking the current MCP spec
 `2026-07-28` — the "v2" generation (stateless core: no `initialize` handshake,
@@ -78,26 +78,10 @@ legacy-handshake client's `initialize` is answered with
 `@modelcontextprotocol/sdk` 1.32.1, protocol `2025-11-25`) is preserved at git
 tag `v1.1.0`.
 
-Hermes speaks both eras — `LATEST_HANDSHAKE_VERSION = 2025-11-25`,
-`LATEST_PROTOCOL_VERSION = 2026-07-28` (from the installed Python `mcp` SDK):
-
-- `protocol: auto` (default) tries the legacy handshake first, then falls back
-  to `server/discover` on `-32022` / method-not-found — so this server needs
-  **no config change**.
-- `protocol: stateless|modern|2026-07-28` forces discover-first; `legacy` is
-  handshake-only and will NOT connect to this server.
-- Seed `MCP-Protocol-Version` from `LATEST_HANDSHAKE_VERSION`, never
-  `LATEST_PROTOCOL_VERSION`, or the handshake lands on the envelope ladder and
-  is rejected.
-
-### Upgrading an MCP server to v2 (TypeScript) — procedure
-
-1. Install `@modelcontextprotocol/server` (+ `@modelcontextprotocol/node`, `zod >= 4.2`); drop the monolithic `@modelcontextprotocol/sdk`.
-2. Replace `Server` + `StdioServerTransport` + manual `setRequestHandler(ListTools/CallTool)` with `McpServer` and `serveStdio(factory, opts)`.
-3. Convert each tool's JSON Schema `inputSchema` with `fromJsonSchema(...)`; register with `server.registerTool(name, {description, inputSchema}, cb)`.
-4. The callback receives `(args, ctx)` and must return a `CallToolResult` — `{content:[{type:'text', text: JSON.stringify(result)}]}`. The SDK no longer wraps a raw object; wrap it yourself (and keep the `ms` timing field).
-5. `serveStdio(factory, opts)` returns a `StdioServerHandle` **synchronously** — it is NOT a Promise. Do not `.catch()` it; route errors through the `onerror` option.
-6. `legacy: "reject"` makes the server modern-only (2026-07-28); omit it (default `'serve'`) to keep serving v1 clients too.
+Hermes speaks both eras — `protocol: auto` (default) tries the legacy handshake
+first, then falls back to `server/discover` on `-32022` / method-not-found — so
+this server needs **no config change**. `protocol: legacy` is handshake-only
+and will NOT connect to this server.
 
 ## Tool set (28)
 
@@ -108,7 +92,7 @@ Hermes speaks both eras — `LATEST_HANDSHAKE_VERSION = 2025-11-25`,
 | `perch_pull` | Fetch `modelText` + `outputTemplate` from the public API into `.perch-mirror/<name>/`. ~1s, no Cloudflare. Accepts `{name, dir}`; `name` defaults to the current session generator. |
 | `perch_fetch_generator` | Alias of `perch_pull` for "fetch any public generator". |
 | `perch_src` | Read one `src/` file (from `srcManifest`) via the CDN. |
-| `perch_list_src` | List `src/` files with sizes. Returns `count: 0` when the generator keeps everything in `main.pjs` — that is not an error. |
+| `perch_list_src` | List `src/` files with sizes. Returns `count: 0` when the generator keeps everything in `main.pjs` — that is not an error. It reflects the last OWNER save, not the collab room (see pitfall 17). |
 
 ### Session lifecycle
 
@@ -124,7 +108,9 @@ Hermes speaks both eras — `LATEST_HANDSHAKE_VERSION = 2025-11-25`,
 Results and `perch_status` also carry `effectiveEngine` — what is actually
 running (`patchright`, `patchright + chrome channel`, `playwright`, or
 `playwright (patchright module unavailable)` when the optional dependency is
-missing and the session silently runs the default engine).
+missing and the session silently runs the default engine). An explicit `engine`
+that differs from the running browser forces a relaunch, so the request always
+takes effect.
 
 **Engine default: `patchright`** (stealth driver) since 2026-10-17 — the owner
 flipped it in `perch-core.js` `start()` after repeated CF stalls on the default
@@ -148,8 +134,8 @@ chromium. Notes:
 | Tool | Purpose |
 |---|---|
 | `perch_navigate` | Navigate the whole editor **page** (top-level) to any `https://` URL, waiting out a CF interstitial. Recovery tool. |
-| `perch_upload_src` | Upload into the generator's `src/` through the editor's file panel. `name` may carry a virtual folder path (`emoji/icon.svg`) — the store is flat `/`-keys. Source the bytes one of three ways: `content` (small inline text only — it transits the model's context), `filePath` (absolute local path, read server-side, byte-exact) or `url` (fetched server-side); `binary` overrides text/binary inference. `overwrite:true` deletes an existing file at that path first — the editor otherwise RENAMES colliding uploads to `name-2.ext` instead of replacing. |
-| `perch_delete_src` | Delete `{path}` from the generator's `src/` via the file tree (⋯ → 🗑️ delete → confirm). Staged; goes public when the owner saves. |
+| `perch_upload_src` | Upload into the generator's `src/` via the file panel. `name` may carry a virtual folder path (`emoji/icon.svg` — the store is flat `/`-keys, the editor keeps the full path). Source the bytes via `filePath` (ABSOLUTE local path, read server-side, byte-exact) or `url` (fetched server-side) — inline `content` only for small text. `overwrite:true` replaces an existing file (the editor otherwise renames colliding uploads to `name-2.ext`). `binary` forces base64 handling when extension inference is wrong. Landing is verified against the room-synced src store, NOT the panel's "saved" marker (that marker misses folder-path rows and never fires when the upload embed is CF-blocked): results carry `landed`, `integrity` (`match` \| `utf8-mangled` \| `unknown`), `sha256` (source bytes), `storeHash`/`storeSize` (what the room holds) and `embedBlocked`. `ok:false` + `integrity:'utf8-mangled'` = the file LANDED but its bytes are corrupted — see pitfall 16. |
+| `perch_delete_src` | Delete `{path}` from the generator's `src/` via the file tree (⋯ → 🗑️ delete → confirm). Staged like uploads; public when the owner saves. Results carry `storeConfirmed` (room registry lists the path gone or `{deleted:true}`); `ok:false` with `deleted:true` means the row vanished but the store still listed the path — re-check. Row matching is anchored on the file-name leaf, so a shared folder container can no longer select a sibling row's ⋯ button (this once deleted the wrong sibling). |
 
 ### Reading (live)
 
@@ -199,6 +185,36 @@ appear or vanish), `perch_click`, `perch_type` (`submit: true` = Enter),
 
 Never `perch_refresh` immediately after a write — let the Yjs settle finish or
 the edit can be reverted.
+
+### Working-copy → room parity (before and after patching)
+
+When the local working copy started from a pull of the same room, confirm the
+room is the state your copy assumes BEFORE anchoring edits: `perch_status`'s
+`outputLines`/`modelLines` must equal `wc -l` on the local files, plus 2–3
+anchor greps at known line numbers. After a multi-hunk `perch_patch`, the same
+parity check is the strongest proof every hunk landed: `applied: N` on each
+change plus the live line count equal to the locally patched file's `wc -l`.
+Patch hunks that were already applied and verified unique against the working
+copy can be reused verbatim as the `perch_patch` payloads. For HTML output
+documents, run the local syntax gate FIRST —
+`python scripts/check_html_scripts.py <index.html>` (extracts every script
+block by browser tag pairing and `node --check`es each) — so a syntax error
+never reaches the shared room at all.
+
+When the counts disagree after a patch batch, localize the drift by anchor
+lines before touching anything: grep 3–4 unique signature strings in BOTH the
+live pane (`perch_grep`, note the line numbers) and the local file (`grep -n`)
+and compare — anchors before the drift match, anchors after it are shifted by
+the delta, so the first divergent anchor bounds the extra/missing text. A
+delta is not always a failed hunk: when several review rounds stacked up, the
+local copy and the room can carry differently-worded but equivalent text
+(a comment or a reworded line), which shows up as a small count offset.
+Reconcile by reading the divergent region in the live pane, deciding which
+wording is intended-final, and syncing the other copy to it — then re-run the
+refresher/map step if the working copy changed. After the owner saves an
+intermediate round mid-session, that saved state IS the new room baseline
+(`outputLines` = your previous deploy's line count): re-baseline before
+composing the next batch.
 
 ## Collab semantics (the rule that changes what you report)
 
@@ -341,7 +357,17 @@ clear, and reports `recoveryStep` plus a per-step `attempts` log.
      `!important` to override. `showEl/hideEl` round-trip relies on the stylesheet's display
      rule (e.g. `#messageFeedOpenLeftColumnButton`): never add a `display: none !important` to
      such a button — it makes the element unreachable after a hide/show cycle.
-14. **`serveStdio` is not a Promise.** In the v2 SDK it returns a `StdioServerHandle` synchronously — calling `.catch()` on it throws `TypeError: serveStdio(...).catch is not a function`. Route failures through the `onerror` option instead.
+14. **`src/` uploads never overwrite — re-uploading an existing path lands as `name-2.ext`**
+    behind a "Some files were renamed (name already taken…)" modal. Pass `overwrite: true`
+    (it deletes the existing entry first; a staged delete clears the panel's collision check,
+    so the re-upload lands on the exact same key) and source big/dense files via `filePath` or
+    `url` — inline `content` transits the model's context, and one mis-copied path coordinate
+    is a silent visual bug. Delete is staged like upload: the row vanishes at once, visitors
+    see it when the owner saves.
+15. **Deploy accumulated local rounds as FINAL-STATE hunks against the live doc's actual state.** When the working copy has run ahead over several edit rounds and the room still holds an older state (owner save pending, or an earlier deploy was interrupted), do not replay the round-by-round diffs: grep the live pane for each round's anchors, then compose each `perch_patch` old/new pair to transform the LIVE text straight to the final state. Replaying intermediate hunks either fails to match or double-applies, and partial application stays invisible until the line-count parity check flags it.
+16. **Binary uploads are CORRUPTED when the upload embed is Cloudflare-blocked.** The panel's normal upload path pushes bytes through the `upload.perchance.org/embed` iframe; when CF blocks that embed (`ERR_BLOCKED_BY_RESPONSE` / `X-Frame-Options` in the console — also logged by the panel as `src background pre-upload failed for <name>: upload embed unavailable`), the panel falls back to storing the file through the room sync as UTF-8 TEXT. Text files round-trip losslessly; binary files get mojibake'd (measured: a 93,732-byte onnx landed as 165,640 bytes; the stored sha256 equals the sha256 of the source's UTF-8-decode-re-encode). The tree still SHOWS the file, and `perch_upload_src` reports the truth: `ok:false, landed:true, integrity:'utf8-mangled', storeHash:<mangled>`. Fix: clear the block top-level (`perch_navigate https://upload.perchance.org/embed`, wait out the challenge, `perch_start {force:true}`) and re-upload; until the embed clears, only text uploads are safe. Don't burn time on embed-recovery BEFORE checking the store — the upload may have landed anyway.
+17. **Verifying staged `src/` state (pre-save) — `perch_list_src` is blind to it.** The CDN manifest (and `perch_list_src`) reflects only the last OWNER save. For what the ROOM actually holds, eval the editor frame: `perch_eval {frame:"editor", js:"JSON.stringify(window.srcState?._internals?.working ?? null)"}` → `{path: {pending, size, rev, writeTime}}`; the sha256 registry lives in the Yjs doc: `perch_eval {frame:"editor", js:"(()=>{const m=window.yjsProvider?.doc?.share?.get('___pendingSrc___');const o={};m&&m.forEach((v,k)=>o[k]=v);return JSON.stringify(o)})()"}` → `{path: {hash, size, rev, tabId, deleted?, committed?}}`. Tombstones (`deleted:true`) mark staged deletions, and the tree keeps rendering a folder until the owner saves even when every file under it is tombstoned.
+18. **Perchance-AI replies can hang forever when CF challenges a subdomain.** The ai-text plugin runs in an iframe (`#aiTextPluginEmbedIframe` → `text-generation.perchance.org/embed`). When Cloudflare challenges that subdomain, the request is composed (`getBotReply` logged) but never answers and never errors — the UI stays on `Generating...` indefinitely. Verified unfixable agent-side on a flagged IP: the top-level challenge (`perch_navigate` to the embed URL) did not clear under patchright OR plain chromium (90s ×3, fresh contexts), so the iframe can never establish. If a task needs AI replies, say so plainly and hand off to the user's own browser; everything else (UI driving, editing, text src uploads) works. Same root cause as pitfall 16's upload embed.
 
 ## UI testing without screenshots
 
@@ -359,42 +385,6 @@ perch_eval  {js: "document.querySelectorAll('.bubble').length"}
 
 Reach for `perch_shot` only when a human needs to see it.
 
-## Verifying the server itself
-
-Run these from the repo (native node, forward-slash paths):
-
-```bash
-node test/smoke-core.mjs                       # perch-core.js directly, public template
-node test/smoke-mcp.mjs                        # the server over real stdio JSON-RPC
-node test/smoke-mcp.mjs my-generator MYKEY     # against your own generator
-```
-
-`smoke-mcp` is a MODERN client (2026-07-28): it calls `server/discover` first,
-sends the required `_meta` envelope (`io.modelcontextprotocol/protocolVersion` +
-`clientCapabilities` + `clientInfo`) on every request, asserts that a legacy
-`initialize` is rejected with `-32022`, and checks `resultType: "complete"` on
-every result. A bare request without the envelope is rejected with
-`modern-only-missing-envelope` — that is the server enforcing the spec, not a
-bug.
-
-A minimal live round-trip against a real generator, using the tools directly:
-
-```
-perch_start   {name, collabKey}      → ok:true, docsReady:true, recoveryStep:"reuse"
-perch_status                          → collabSynced:true, saveState:"saved", modelLines/outputLines
-perch_read    {pane:"model"}          → numbered lines, matches the deployed line count
-perch_eval    {js:'document.querySelector("h1").textContent'}   → the generator's heading
-perch_edit    {pane, oldString, newString}                      → {ok:true, replacements:1}
-perch_grep    {pattern:"mcp-verify"} → 1 hit            # the write landed
-perch_edit    {… reversed …}                                    → revert
-perch_grep    {pattern:"mcp-verify"} → 0 hits           # document restored
-perch_stop
-```
-
-Read-only checks are safe on someone else's room. A write test is only
-appropriate when the user asked for a real edit (or explicitly handed you a collab
-key to test with) — and revert it in the same session.
-
 ## Windows notes
 
 - Register with **`command: <absolute path to node.exe>`** and an absolute
@@ -406,32 +396,6 @@ key to test with) — and revert it in the same session.
 - Give the server a generous timeout — a full CF ladder can outlast short
   ceilings (`hermes mcp add perch --command "C:/Program Files/nodejs/node.exe"`
   --connect-timeout 120 --args "<repo>/perch-mcp.mjs"`).
-
-## Adding a tool
-
-1. `perch-mcp.mjs` — add a `TOOLS` entry (name, description, `inputSchema`).
-2. `perch-mcp.mjs` — add a `DISPATCH` line wiring the name to a `PerchSession` method.
-3. `perch-core.js` — implement the method on `PerchSession`.
-
-`perch-mcp.mjs` already wraps every result in JSON, adds `ms`, and turns a throw
-into `{ok: false, error}` — no new plumbing. Restart the MCP client so it
-re-lists tools, then run `node test/smoke-mcp.mjs`.
-
-## Maintenance / publishing (this repo)
-
-- **Run `npm run test:core` before pushing** any engine/dependency change — it
-  drives the DEFAULT engine through the whole surface (pull, CF ladder, eval,
-  screenshot), which is the only real proof a default flip works.
-- **Probe the engine launch before committing a default flip**: the
-  `channel: 'chrome'` path needs system Chrome (absent on some machines — the
-  bundled chromium build is the working path there).
-- **When promoting a driver to a hard dependency, check its `engines` field**:
-  patchright 1.64 requires Node ≥ 20, so `package.json` `engines`, the README
-  install line, and the dependency move must land together.
-- **Credit engines/SDKs with URLs + licenses read from the INSTALLED packages'
-  `package.json`** (`node -e "require('…/package.json')"`) — the org name is not
-  guessable (patchright lives under `Kaliiiiiiiiii-Vinyzu` and is easy to
-  misspell from memory), and the license belongs in the README credits.
 
 ## Security
 
@@ -445,17 +409,3 @@ re-lists tools, then run `node test/smoke-mcp.mjs`.
   pages you have a reason to inspect.
 - **Every write touches a live shared document.**
 
-## Architecture
-
-One long-lived Node process holds one Chromium instance; every tool call is a
-direct in-process method call on a single `PerchSession` (the `@playwright/mcp`
-model). No TCP daemon, no per-call spawn, 20-minute idle timer on the browser.
-
-Browser-free endpoints:
-
-- `POST https://perchance.org/api/getGeneratorPageData` →
-  `generator.modelText`, `generator.outputTemplate`, `generator.srcManifest`.
-- `GET https://user.uploads.dev/file/<key>` → the `src/` files. Not behind Cloudflare.
-
-`curl` passes Cloudflare where Node's own TLS fingerprint does not, which is why
-the browser-free path shells out to it instead of using `fetch`.

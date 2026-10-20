@@ -495,6 +495,15 @@ class PerchSession {
     const t0 = Date.now();
     if (!name) throw new Error('missing generator name');
     if (engine) this.engine = engine; else this.engine = 'patchright'; // default: stealth driver (falls back to playwright when the optional module is absent)
+    // An explicit engine that differs from the RUNNING browser must take
+    // effect: the ladder's 'newctx' step only recreates the context and would
+    // otherwise silently keep the old engine (observed: engine:"chromium"
+    // answered effectiveEngine:"patchright"). Force a relaunch in that case.
+    if (engine && this.browser && ((this._usingPatchright && this.engine !== 'patchright') || (!this._usingPatchright && this.engine === 'patchright'))) {
+      try { if (this.ctx) { await this.ctx.close(); } } catch {}
+      try { await this.browser.close(); } catch {}
+      this.ctx = null; this.browser = null; this.page = null; this.ready = false;
+    }
     if (this.page && !force && this.ready && this.generator === name && this.collabKey === collabKey) {
       const s = await this.status();
       // Fall through to the ladder when the page is CF-blocked or the editor
@@ -1109,6 +1118,13 @@ class PerchSession {
     const given = [!!content, !!filePath, !!url].filter(Boolean).length;
     if (given === 0) return { error: 'one of content, filePath or url is required' };
     if (given > 1) return { error: 'pass only ONE of content, filePath or url' };
+    // sha256 of the exact bytes being sent, plus sha256 of what the editor's
+    // UTF-8 text fallback would store — uploadSrc uses these to classify a
+    // landed upload as intact ('match') vs utf8-mangled (binary corrupted by
+    // the panel's room-sync text fallback when the upload embed is blocked)
+    const { createHash } = require('crypto');
+    const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
+    const mangledSha256 = (buf) => createHash('sha256').update(buf.toString('utf8'), 'utf8').digest('hex');
     let ext = '';
     if (filePath) {
       if (typeof filePath !== 'string' || !(/^[A-Za-z]:[\\/]/.test(filePath) || filePath.startsWith('/'))) {
@@ -1119,8 +1135,8 @@ class PerchSession {
       ext = (filePath.split('.').pop() || '').toLowerCase();
       const isBinary = binary !== undefined ? !!binary : BINARY_EXTS.includes(ext);
       const buf = fs.readFileSync(filePath);
-      if (isBinary) return { base64: buf.toString('base64'), bytes: buf.length, ext, source: 'file' };
-      return { text: buf.toString('utf8'), bytes: buf.length, ext, source: 'file' };
+      if (isBinary) return { base64: buf.toString('base64'), bytes: buf.length, ext, source: 'file', sha256: sha256(buf), mangledSha256: mangledSha256(buf) };
+      return { text: buf.toString('utf8'), bytes: buf.length, ext, source: 'file', sha256: sha256(buf), mangledSha256: mangledSha256(buf) };
     }
     if (url) {
       if (!/^https?:\/\//i.test(url)) return { error: 'url must start with http(s)://' };
@@ -1129,11 +1145,12 @@ class PerchSession {
       let buf;
       try { buf = this._curlBuffer(url); } catch (e) { return { error: 'url fetch failed: ' + e.message }; }
       if (!buf || !buf.length) return { error: 'url fetch returned an empty body: ' + url };
-      if (isBinary) return { base64: buf.toString('base64'), bytes: buf.length, ext, source: 'url' };
-      return { text: buf.toString('utf8'), bytes: buf.length, ext, source: 'url' };
+      if (isBinary) return { base64: buf.toString('base64'), bytes: buf.length, ext, source: 'url', sha256: sha256(buf), mangledSha256: mangledSha256(buf) };
+      return { text: buf.toString('utf8'), bytes: buf.length, ext, source: 'url', sha256: sha256(buf), mangledSha256: mangledSha256(buf) };
     }
     const text = String(content);
-    return { text, bytes: Buffer.byteLength(text), ext: '', source: 'content' };
+    const cbuf = Buffer.from(text, 'utf8');
+    return { text, bytes: cbuf.length, ext: '', source: 'content', sha256: sha256(cbuf), mangledSha256: mangledSha256(cbuf) };
   }
 
   // Shared row-menu delete flow. Row matching is TEXT-anchored (the ⋯ button whose
@@ -1145,13 +1162,19 @@ class PerchSession {
       const panel = document.querySelector('#aiAgentPanelEl');
       if (!panel) return { ok: false, error: 'files panel not found' };
       const fname = path.split('/').pop();
-      const btns = [...panel.querySelectorAll('button')].filter(b => (b.title || '').indexOf('download / rename / delete') !== -1);
-      for (const b of btns) {
-        let row = b.parentElement;
-        for (let i = 0; i < 4 && row && row !== panel; i++) {
-          const t = row.textContent || '';
-          if (t.indexOf(fname) !== -1 && t.length < 160) return { ok: true, found: true };
-          row = row.parentElement;
+      // Anchor on the unique NAME LEAF (shortest childless element containing
+      // the basename) and climb to its own row button. Matching any <160-char
+      // ancestor container instead can select a SIBLING row's button when
+      // several files share one container — this deleted the wrong file once.
+      const leaves = [...panel.querySelectorAll('*')].filter(el =>
+        el.childElementCount === 0 && (el.textContent || '').indexOf(fname) !== -1 && (el.textContent || '').length < 80);
+      for (const nameEl of leaves.sort((a, b) => (a.textContent || '').length - (b.textContent || '').length)) {
+        let n = nameEl;
+        while (n && n !== panel) {
+          if ([...n.querySelectorAll('button')].some(b => (b.title || '').indexOf('download / rename / delete') !== -1)) {
+            return { ok: true, found: true };
+          }
+          n = n.parentElement;
         }
       }
       // not rendered: expand the first folder segment if the path has one
@@ -1170,17 +1193,18 @@ class PerchSession {
       if (!probe.ok) return { existed: false, error: probe.error };
       if (!probe.found) return { existed: false };
     }
-    // open the row's ⋯ menu
+    // open the row's ⋯ menu (name-leaf anchored — see findRow above)
     const menu = await evalMain(ed, ({ path }) => {
       const panel = document.querySelector('#aiAgentPanelEl');
       const fname = path.split('/').pop();
-      const btns = [...panel.querySelectorAll('button')].filter(b => (b.title || '').indexOf('download / rename / delete') !== -1);
-      for (const b of btns) {
-        let row = b.parentElement;
-        for (let i = 0; i < 4 && row && row !== panel; i++) {
-          const t = row.textContent || '';
-          if (t.indexOf(fname) !== -1 && t.length < 160) { b.click(); return { ok: true }; }
-          row = row.parentElement;
+      const leaves = [...panel.querySelectorAll('*')].filter(el =>
+        el.childElementCount === 0 && (el.textContent || '').indexOf(fname) !== -1 && (el.textContent || '').length < 80);
+      for (const nameEl of leaves.sort((a, b) => (a.textContent || '').length - (b.textContent || '').length)) {
+        let n = nameEl;
+        while (n && n !== panel) {
+          const btn = [...n.querySelectorAll('button')].find(b => (b.title || '').indexOf('download / rename / delete') !== -1);
+          if (btn) { btn.click(); return { ok: true }; }
+          n = n.parentElement;
         }
       }
       return { ok: false, error: 'row menu button (⋯) not found' };
@@ -1218,14 +1242,17 @@ class PerchSession {
     while (Date.now() - t0 < timeout) {
       const gone = await evalMain(ed, ({ path }) => {
         const panel = document.querySelector('#aiAgentPanelEl');
+        if (!panel) return { gone: false };
         const fname = path.split('/').pop();
-        const btns = [...panel.querySelectorAll('button')].filter(b => (b.title || '').indexOf('download / rename / delete') !== -1);
-        for (const b of btns) {
-          let row = b.parentElement;
-          for (let i = 0; i < 4 && row && row !== panel; i++) {
-            const t = row.textContent || '';
-            if (t.indexOf(fname) !== -1 && t.length < 160) return { gone: false };
-            row = row.parentElement;
+        // gone = no name leaf whose row still carries a ⋯ button (a transient
+        // status line mentioning the file must not block the check)
+        const leaves = [...panel.querySelectorAll('*')].filter(el =>
+          el.childElementCount === 0 && (el.textContent || '').indexOf(fname) !== -1 && (el.textContent || '').length < 80);
+        for (const nameEl of leaves) {
+          let n = nameEl;
+          while (n && n !== panel) {
+            if ([...n.querySelectorAll('button')].some(b => (b.title || '').indexOf('download / rename / delete') !== -1)) return { gone: false };
+            n = n.parentElement;
           }
         }
         return { gone: true };
@@ -1245,12 +1272,41 @@ class PerchSession {
     if (!(await this._ensureFilesPanel(ed))) return { ok: false, error: 'could not open the files panel' };
     const r = await this._deleteSrcRow(ed, path, { timeout });
     if (!r.existed) return { ok: false, error: 'src path not in the file tree: ' + path };
+    // store-level confirmation: the tree row can vanish while the room-synced
+    // store still lists the path (or lists a {deleted:true} tombstone, which
+    // counts as deleted). The registry settles a beat after the row disappears,
+    // so poll briefly. null = store not observable (older editor build).
+    let storeConfirmed = null;
+    const scT0 = Date.now();
+    while (Date.now() - scT0 < 6000) {
+      const st = await evalMain(ed, ({ path }) => {
+        const w = window.srcState && window.srcState._internals && window.srcState._internals.working;
+        const e = w ? w[path] : null;
+        // tombstones ({deleted:true}) live in the room registry YMap
+        let y = null;
+        try {
+          const share = window.yjsProvider && window.yjsProvider.doc && window.yjsProvider.doc.share;
+          const m = share && share.get && share.get('___pendingSrc___');
+          if (m && m.get) y = m.get(path) || null;
+        } catch (err) { /* older editor without the registry */ }
+        if (!e && !y) return { present: false };
+        return { present: true, deleted: !!((y && y.deleted) || (e && e.deleted)) };
+      }, { path }).catch(() => null);
+      if (st) {
+        storeConfirmed = !st.present || st.deleted === true;
+        if (storeConfirmed) break;
+      }
+      await this.page.waitForTimeout(800);
+    }
+    const deleted = !!r.deleted && storeConfirmed !== false;
     return {
-      ok: !!r.deleted,
+      ok: deleted,
       deleted: !!r.deleted,
+      storeConfirmed,
       path,
-      error: r.error,
-      hint: r.deleted ? 'staged in the editor store; visitors see it once the generator owner saves' : undefined,
+      error: r.error || (!r.deleted ? undefined
+        : (storeConfirmed === false ? 'row removed from the tree but the editor src store still lists this path — re-check or retry' : undefined)),
+      hint: deleted ? 'staged in the editor store; visitors see it once the generator owner saves' : undefined,
     };
   }
 
@@ -1300,11 +1356,18 @@ class PerchSession {
       return { ok: true };
     }, { name, content: src.base64 || src.text, base64: !!src.base64 });
     if (!r.ok) return r;
-    // wait for the tree to mark the file saved — and catch the editor's
-    // collision rename ("Some files were renamed (name already taken…)")
+    // Wait for the upload to land. The panel's innerText "saved" marker is
+    // NOT authoritative: folder-path rows render the basename only (the full
+    // path never appears in the text), and when the upload embed
+    // (upload.perchance.org) is Cloudflare-blocked the marker can never
+    // appear even though the panel's room-sync fallback DID store the file.
+    // Authoritative signal: window.srcState._internals.working[name] — the
+    // room-synced store entry carries {size, hash, rev}.
     const t0 = Date.now();
     let saved = false;
     let renamedTo = null;
+    let storeInfo = null;
+    let savedAt = 0;
     while (Date.now() - t0 < timeout) {
       const state = await evalMain(ed, ({ name }) => {
         const panel = document.querySelector('#aiAgentPanelEl');
@@ -1321,21 +1384,77 @@ class PerchSession {
           const okBtn = [...ov.querySelectorAll('button')].pop();
           if (okBtn) okBtn.click(); // dismiss so later calls are not blocked
         }
-        return { txt, renamed };
+        let store = null;
+        try {
+          const w = window.srcState && window.srcState._internals && window.srcState._internals.working;
+          const e = w ? w[name] : null;
+          // the sha256 lives in the room registry YMap, not in working[]
+          let y = null;
+          try {
+            const share = window.yjsProvider && window.yjsProvider.doc && window.yjsProvider.doc.share;
+            const m = share && share.get && share.get('___pendingSrc___');
+            if (m && m.get) y = m.get(name) || null;
+          } catch (err2) { /* older editor without the registry */ }
+          const entry = y || e;
+          if (entry) store = {
+            deleted: !!(entry.deleted || (e && e.deleted)),
+            committed: !!(y && y.committed),
+            size: (entry.size !== undefined ? entry.size : (e ? e.size : null)),
+            hash: (y && y.hash) || null,
+            rev: entry.rev || null,
+          };
+        } catch (err) { /* best-effort probe */ }
+        return { txt, renamed, store };
       }, { name }).catch(() => null);
       if (state && state.renamed) { renamedTo = state.renamed; break; }
-      if (state && state.txt.includes(name) && /saved/i.test(state.txt)) { saved = true; break; }
+      if (state && state.store && !state.store.deleted) {
+        storeInfo = state.store;
+        if (state.store.hash) break; // complete entry — classify integrity
+      }
+      if (state && state.txt.includes(name) && /saved/i.test(state.txt)) {
+        saved = true;
+        // the room-registry entry (carrying sha256) can lag the panel marker
+        // by a beat — keep polling a few more seconds so integrity gets
+        // classified instead of reporting an unverified landing
+        if (!savedAt) savedAt = Date.now();
+        else if (Date.now() - savedAt > 6000) break;
+      }
       await this.page.waitForTimeout(800);
     }
+    // integrity: what the room actually holds vs the exact bytes injected.
+    // 'utf8-mangled' = the panel's text fallback stored the file through a
+    // UTF-8 decode, which corrupts binary files (text files round-trip
+    // losslessly, so their hash still matches the source).
+    let integrity = 'unknown';
+    if (storeInfo && src.sha256) {
+      if (storeInfo.hash === src.sha256) integrity = 'match';
+      else if (src.mangledSha256 && storeInfo.hash === src.mangledSha256) integrity = 'utf8-mangled';
+    }
+    const landed = !!storeInfo;
+    const mangled = integrity === 'utf8-mangled';
+    const embedBlocked = this.diag.console.some(l => String(l).indexOf('upload.perchance.org') !== -1 &&
+      (String(l).indexOf('ERR_BLOCKED') !== -1 || String(l).indexOf('X-Frame-Options') !== -1));
     return {
-      ok: saved, file: name, saved, overwritten: overwrote, renamedTo, ms: Date.now() - t0,
+      ok: !mangled && (landed || saved),
+      file: name, saved, landed, integrity,
+      overwritten: overwrote, renamedTo, ms: Date.now() - t0,
       bytes: src.bytes, source: src.source,
+      sha256: src.sha256 || null,
+      storeHash: storeInfo ? storeInfo.hash : null,
+      storeSize: storeInfo ? storeInfo.size : null,
+      embedBlocked,
       error: renamedTo
         ? 'the editor renamed the upload because the name already exists — it landed at ' + renamedTo + '; retry with overwrite:true to replace the original'
-        : undefined,
-      hint: saved
-        ? 'saved to the editor src store; visitors see it once the generator owner saves'
-        : (renamedTo ? undefined : 'file was injected but the panel never reported "saved" — check perch_errors and retry'),
+        : (mangled
+          ? 'landed in the editor src store but the bytes are CORRUPTED (integrity utf8-mangled): the upload embed (upload.perchance.org) was Cloudflare-blocked, so the panel fell back to UTF-8 text storage, which destroys binary files (stored ' + storeInfo.size + ' bytes vs source ' + src.bytes + '). Text files are unaffected. Fix: perch_navigate https://upload.perchance.org/embed (top-level, let the challenge clear), perch_start force:true, then re-upload.'
+          : undefined),
+      hint: mangled
+        ? 'do not treat this file as uploaded — the staged bytes do not match the source'
+        : (landed
+          ? 'landed in the editor src store (integrity: ' + integrity + '); visitors see it once the generator owner saves'
+          : (saved
+            ? 'panel reported "saved" but no store entry was observed — verify with perch_eval {frame:"editor", js:"JSON.stringify(window.srcState._internals.working)"}'
+            : (renamedTo ? undefined : 'file was injected but never landed in the editor src store and the panel never reported "saved" — check perch_errors and retry'))),
     };
   }
 
